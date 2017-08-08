@@ -8,7 +8,7 @@ import os
 import os.path as op
 import pyvtk
 
-from ..utils.compute_stuff import triangle_normal
+from ..utils.compute_misc import triangle_normal
 
 def read_surface(fname):
     """Load a surface mesh in either .off or .stl file format. Return the 

@@ -10,14 +10,14 @@ from setuptools import setup
 
 setup(
     name = "meeg_tools",
-    version = "0.1a",
+    version = "0.1",
     author = "Jesper Duemose Nielsen",
     author_email = "jdue@dtu.dk",
     description = "MEEG data analysis tools based on MNE",
     #license = "BSD",
     keywords = "EEG MEG",
-    #url = "http://packages.python.org/an_example_pypi_project",
-    packages=['an_example_pypi_project', 'tests'],
+    url = "https://github.com/jdue/meeg_scripts",
+    packages=['meeg_tools'],
     #long_description=read('README'),
     classifiers=[
         "Development Status :: 3 - Alpha",
