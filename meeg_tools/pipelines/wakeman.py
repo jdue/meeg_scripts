@@ -26,6 +26,10 @@ from meeg_tools.viz import visualize_misc
 from sklearn.model_selection import KFold
 from scipy.stats import sem
 
+mne.set_log_level(verbose='WARNING')
+
+#import matplotlib as mpl
+#mpl.use('Qt4Agg')
 
 #plt.rcParams['savefig.dpi'] = 600
 # =============================================================================
@@ -175,6 +179,13 @@ def preprocess_raw(raw, channels=None, filt=None, phys='ica-reg'):
             raw.rename_channels(channels['rename'])
         if 'change_types' in channels:
             raw.set_channel_types(channels['change_types'])
+            
+        # Set bad channels
+        if 'bads' in channels:
+            raw.info["bads"] += channels['bads']
+            if any(raw.info["bads"]):
+                print("The following channels has been marked as bad:")
+                print(raw.info["bads"])
     
     
     # Get indices for different channel types (EEG, MAG, GRAD)
@@ -183,16 +194,11 @@ def preprocess_raw(raw, channels=None, filt=None, phys='ica-reg'):
     # EOG and ECG
     eog = mne.pick_types(raw.info, meg=False, eog=True, ref_meg=False)
     if any(eog):
-        heog = mne.pick_channels(raw.info["ch_names"], ["HEOG"])
         veog = mne.pick_channels(raw.info["ch_names"], ["VEOG"])
+        heog = mne.pick_channels(raw.info["ch_names"], ["HEOG"])
     ecg = mne.pick_types(raw.info, meg=False, ecg=True, ref_meg=False)
     
-    # Set bad channels
-    raw.info["bads"] += channels['bads']
-    if any(raw.info["bads"]):
-        print("The following channels has been marked as bad:")
-        print(raw.info["bads"])
-    
+
     # Maxwell Filtering
     # =========================================================================
     # If continuous HPI/MaxFiltering
@@ -226,10 +232,14 @@ def preprocess_raw(raw, channels=None, filt=None, phys='ica-reg'):
     except TypeError:
         na = 0
         ##################### HANDLE THIS #####################
-        raise ValueError("handle this -> if no annotations exist")
+        #raise ValueError("handle this -> if no annotations exist")
            
     compute_misc.detect_squid_jumps(raw)
-    print("Annotated {} segments as bad".format(len(raw.annotations)-na))
+    try:
+        print("Annotated {} segments as bad".format(len(raw.annotations)-na))
+    except TypeError:
+        # no annotations
+        print("Annotated 0 segments as bad")
 
     # Eyeblinks and heartbeats
     # =========================================================================
@@ -301,8 +311,12 @@ def preprocess_raw(raw, channels=None, filt=None, phys='ica-reg'):
         tmin = 0
     tmax = np.inf
     
-    chpi_freqs = [hpi["coil_freq"][0] for hpi in raw.info["hpi_meas"][0]["hpi_coils"]]
-    
+    try:
+        chpi_freqs = [hpi["coil_freq"][0] for hpi in raw.info["hpi_meas"][0]["hpi_coils"]]
+    except IndexError:
+        # no cHPI info
+        chpi_freqs = []
+        
     psd_kwargs = dict(average=False, line_alpha=alpha_level, show=False, verbose=False)
     
     # PSDs before filtering
@@ -311,15 +325,17 @@ def preprocess_raw(raw, channels=None, filt=None, phys='ica-reg'):
     fig = raw.plot_psd(tmin, tmax, fmin=0, fmax=50, **psd_kwargs)
     fig.savefig(op.join(figdir, "PSD_0_NoFilter_0-50.pdf"))
     
-    # cHPI notch filtering
-    #print("Removing cHPI noise at {} Hz from EEG channels".format(chpi_freqs))
-    raw.notch_filter(chpi_freqs, picks=np.concatenate((chs["eeg"], eog, ecg)))
+    if any(chpi_freqs) and 'eeg' in chs:
+        # cHPI notch filtering
+        #print("Removing cHPI noise at {} Hz from EEG channels".format(chpi_freqs))
+        raw.notch_filter(chpi_freqs, picks=np.concatenate((chs["eeg"], eog, ecg)))
     
     # Notch filtering
     if filt['fnotch'] is not None:
         print("Removing line noise at {} Hz".format(filt['fnotch']))
         raw.notch_filter(filt['fnotch'])
-        raw.notch_filter(filt['fnotch'], picks=np.concatenate((eog, ecg)))
+        if any(eog) or any(ecg):
+            raw.notch_filter(filt['fnotch'], picks=np.concatenate((eog, ecg)))
     
     # 20, 26, 60 ???
     
@@ -330,7 +346,8 @@ def preprocess_raw(raw, channels=None, filt=None, phys='ica-reg'):
     if filt['fmin'] is not None:
         print("Highpass filtering at {} Hz".format(filt['fmin']))
         raw.filter(l_freq=filt['fmin'], h_freq=None)
-        raw.filter(l_freq=filt['fmin'], h_freq=None, picks=np.concatenate((eog, ecg)))
+        if any(eog) or any(ecg):
+            raw.filter(l_freq=filt['fmin'], h_freq=None, picks=np.concatenate((eog, ecg)))
         
         fig = raw.plot_psd(tmin, tmax, fmin=0, fmax=50, **psd_kwargs)
         fig.savefig(op.join(figdir, "PSD_2_NotchHigh_0-50.pdf"))
@@ -339,7 +356,8 @@ def preprocess_raw(raw, channels=None, filt=None, phys='ica-reg'):
     if filt['fmax'] is not None:
         print("Lowpass filtering at {} Hz".format(filt['fmax']))
         raw.filter(l_freq=None, h_freq=filt['fmax'])
-        raw.filter(l_freq=None, h_freq=filt['fmax'], picks=np.concatenate((eog, ecg)))
+        if any(eog) or any(ecg):
+            raw.filter(l_freq=None, h_freq=filt['fmax'], picks=np.concatenate((eog, ecg)))
         
         fig = raw.plot_psd(tmin, tmax, **psd_kwargs)
         fig.savefig(op.join(figdir,"PSD_3_NotchHighLow_0-nyquist.pdf"))
@@ -347,16 +365,17 @@ def preprocess_raw(raw, channels=None, filt=None, phys='ica-reg'):
     
     basename = 'f'+basename
     
-    print("Rereferencing EEG data to average reference")
-    #raw = mne.add_reference_channels(raw, "REF")
-    raw.set_eeg_reference()
+    if 'eeg' in chs:
+        print("Rereferencing EEG data to average reference")
+        #raw = mne.add_reference_channels(raw, "REF")
+        raw.set_eeg_reference()
 
     # Physiological noise correction
     # =========================================================================
     if (phys is not None) and (not any(np.concatenate((eog, ecg)))):
         warn("No EOG or ECG channels detected. Skipping ICA and RLS...")
         phys = None
-    else:
+    if phys is not None:
         basename = 'p'+basename
         print("Correcting for physiological artifacts")
     
