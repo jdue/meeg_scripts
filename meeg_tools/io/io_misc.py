@@ -383,3 +383,37 @@ def concat_sourcespaces(src):
     if len(src) == 1:
         return src[0]
     return src[0]+concat_sourcespaces(src[1:])
+
+    
+def read_pos(filename):
+    """Read coordinates from a Polhemus device.
+    """
+    with open(filename, "r") as f:
+        ndig = np.int(f.readline())
+        digs = []
+        for i in range(ndig):
+            digs.append(np.asarray(f.readline().split()[1:], dtype=np.float64))
+            
+        nasion = f.readline().split()
+        lpa = f.readline().split()
+        rpa = f.readline().split()
+        
+    assert nasion[0] == "nasion"
+    assert lpa[0] == "left"
+    assert rpa[0] == "right"
+    
+    nasion = np.asarray(nasion[1:], dtype=np.float64)
+    lpa = np.asarray(lpa[1:], dtype=np.float64)
+    rpa = np.asarray(rpa[1:], dtype=np.float64)
+    
+    # stack
+    hpi = np.concatenate((nasion[None,:], rpa[None,:], lpa[None,:]), axis=0)[:,[1,0,2]]
+    
+    digs = np.asarray(digs)
+    digs = digs[:,[1,0,2]]
+
+    # Convert from cm to m
+    digs *= 1e-2
+    hpi *= 1e-2
+    
+    return digs, hpi
