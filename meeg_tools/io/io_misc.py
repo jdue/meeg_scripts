@@ -397,23 +397,26 @@ def read_pos(filename):
         nasion = f.readline().split()
         lpa = f.readline().split()
         rpa = f.readline().split()
-        
+    
+    # Digitized points
+    digs = np.asarray(digs)
+    #digs = digs[:,[1,0,2]]
+
+    # Convert from cm to m
+    digs *= 1e-2
+    
     assert nasion[0] == "nasion"
     assert lpa[0] == "left"
     assert rpa[0] == "right"
     
-    nasion = np.asarray(nasion[1:], dtype=np.float64)
-    lpa = np.asarray(lpa[1:], dtype=np.float64)
-    rpa = np.asarray(rpa[1:], dtype=np.float64)
+    nasion = np.asarray(nasion[1:], dtype=np.float64)*1e-2
+    lpa = np.asarray(lpa[1:], dtype=np.float64)*1e-2
+    rpa = np.asarray(rpa[1:], dtype=np.float64)*1e-2
     
     # stack
-    hpi = np.concatenate((nasion[None,:], rpa[None,:], lpa[None,:]), axis=0)[:,[1,0,2]]
+    #hpi = np.concatenate((nasion[None,:], lpa[None,:], rpa[None,:]), axis=0)#[:,[1,0,2]]
     
-    digs = np.asarray(digs)
-    digs = digs[:,[1,0,2]]
-
-    # Convert from cm to m
-    digs *= 1e-2
-    hpi *= 1e-2
     
-    return digs, hpi
+    #hpi *= 1e-2
+    
+    return nasion, lpa, rpa, digs
