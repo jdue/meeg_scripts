@@ -272,7 +272,9 @@ def as_vtk(digs, cells=None, pointdata=None, celldata=None):
     else:
         cd = None
     
-    vtk = pyvtk.VtkData(pyvtk.UnstructuredGrid(digs, **cells), pd, cd)
+    header = 'VTK data'
+    vtk = pyvtk.VtkData(pyvtk.UnstructuredGrid(digs, **cells), header, pd, cd)
+                        #cell_data=cd)
     
     return vtk
     

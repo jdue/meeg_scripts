@@ -451,7 +451,7 @@ def detect_squid_jumps(raw, time=0.1, threshold=4, description = "bad_jump"):
 
         # onset : time in seconds relative to first_samp (!)
         # duration : time in seconds
-        if raw.annotatoins is None:
+        if raw.annotations is None:
             raw.annotations = mne.Annotations(onset, offset-onset, description)
         else:
             raw.annotations.append(onset, offset-onset, description)
