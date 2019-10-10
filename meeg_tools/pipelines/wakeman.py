@@ -10,9 +10,12 @@ from glob import glob
 import matplotlib.pyplot as plt
 import mne
 from mne.io.constants import FIFF
+from numbers import Integral
 import numpy as np
 import os
 import os.path as op
+import scipy.sparse as ss
+from scipy.spatial import cKDTree
 import shutil
 from warnings import warn
 
@@ -26,7 +29,7 @@ from meeg_tools.viz import visualize_misc
 from sklearn.model_selection import KFold
 from scipy.stats import sem
 
-mne.set_log_level(verbose='WARNING')
+#mne.set_log_level(verbose='WARNING')
 
 #import matplotlib as mpl
 #mpl.use('Qt4Agg')
@@ -41,24 +44,24 @@ mne.set_log_level(verbose='WARNING')
 # HIGH LEVEL FUNCTIONS
 # =============================================================================
 
-def prepare_raw(sd, config):
+def prepare_raw(sd, config, i=None):
     """Preprocess raw data.
     """
-    runs = getf(getd(sd, 'runs'), 'meeg_sss_raw.fif')
-    
-    files = list()
-    for i,r in enumerate(runs, 1):
-        print('Preprocessing run {:d}'.format(i))
-        files.append(preprocess_raw(r, **config))
+    if i is None:
+        i = 0
         
-    return files
+    run = getf(getd(sd, 'runs'), 'meeg_sss_raw.fif')[i]
+    print('Preprocessing run {:d}'.format(i+1))
+    raw = preprocess_raw(run, **config)
+        
+    return raw
 
 def prepare_epochs(sd, config):
     """Epoch data.
     """
     #config['PREPROC_EPOCHS']
     
-    raw = getf(getd(sd, 'runs'), 'pfmeeg_sss_raw.fif')
+    raw = getf(getd(sd, 'runs'), '*fmeeg_sss_raw.fif')
     epochs = list()
     for r in raw:
         epochs.append(preprocess_epochs(r, **config))
@@ -83,7 +86,7 @@ def prepare_emptyroom_cov(sd, config):
     #emptyroom = [op.join(emptyroom, i) for i in ['090421', '090707', '090430']]
     emptyroom = glob(op.join(emptyroom, 6*'[0-9]'+'.fif')) # ugly, I know
     
-    raw = getf(d['runs'][0], 'meeg_sss_raw.fif')
+    raw = getf(d['runs'][0], '*fmeeg_sss_raw.fif')
     
     
     #raw_name = op.splitext(op.basename(raw.filenames[0]))[0]
@@ -109,7 +112,9 @@ def preproc_autoreject(sd, config):
 def prepare_epochs_cov(sd, config):
     
     d = getd(sd)
-    epochs = getf(d['run_concat'], 'apf*-epo.fif')
+    epochs = getf(d['run_concat'], 'pf*-epo.fif')
+    if not isinstance(epochs, list):
+        epochs = [epochs]
     
     cov = list()
     for epo in epochs:
@@ -328,14 +333,17 @@ def preprocess_raw(raw, channels=None, filt=None, phys='ica-reg'):
     if any(chpi_freqs) and 'eeg' in chs:
         # cHPI notch filtering
         #print("Removing cHPI noise at {} Hz from EEG channels".format(chpi_freqs))
-        raw.notch_filter(chpi_freqs, picks=np.concatenate((chs["eeg"], eog, ecg)))
+        raw.notch_filter(chpi_freqs,
+                         picks=np.concatenate((chs["eeg"], eog, ecg)),
+                         fir_design='firwin')
     
     # Notch filtering
     if filt['fnotch'] is not None:
         print("Removing line noise at {} Hz".format(filt['fnotch']))
-        raw.notch_filter(filt['fnotch'])
+        raw.notch_filter(filt['fnotch'], fir_design='firwin')
         if any(eog) or any(ecg):
-            raw.notch_filter(filt['fnotch'], picks=np.concatenate((eog, ecg)))
+            raw.notch_filter(filt['fnotch'], picks=np.concatenate((eog, ecg)),
+                             fir_design='firwin')
     
     # 20, 26, 60 ???
     
@@ -345,9 +353,10 @@ def preprocess_raw(raw, channels=None, filt=None, phys='ica-reg'):
     # Highpass filtering
     if filt['fmin'] is not None:
         print("Highpass filtering at {} Hz".format(filt['fmin']))
-        raw.filter(l_freq=filt['fmin'], h_freq=None)
+        raw.filter(l_freq=filt['fmin'], h_freq=None, fir_design='firwin')
         if any(eog) or any(ecg):
-            raw.filter(l_freq=filt['fmin'], h_freq=None, picks=np.concatenate((eog, ecg)))
+            raw.filter(l_freq=filt['fmin'], h_freq=None, picks=np.concatenate((eog, ecg)),
+                       fir_design='firwin')
         
         fig = raw.plot_psd(tmin, tmax, fmin=0, fmax=50, **psd_kwargs)
         fig.savefig(op.join(figdir, "PSD_2_NotchHigh_0-50.pdf"))
@@ -355,9 +364,10 @@ def preprocess_raw(raw, channels=None, filt=None, phys='ica-reg'):
     # Lowpass filtering
     if filt['fmax'] is not None:
         print("Lowpass filtering at {} Hz".format(filt['fmax']))
-        raw.filter(l_freq=None, h_freq=filt['fmax'])
+        raw.filter(l_freq=None, h_freq=filt['fmax'], fir_design='firwin')
         if any(eog) or any(ecg):
-            raw.filter(l_freq=None, h_freq=filt['fmax'], picks=np.concatenate((eog, ecg)))
+            raw.filter(l_freq=None, h_freq=filt['fmax'], picks=np.concatenate((eog, ecg)),
+                       fir_design='firwin')
         
         fig = raw.plot_psd(tmin, tmax, **psd_kwargs)
         fig.savefig(op.join(figdir,"PSD_3_NotchHighLow_0-nyquist.pdf"))
@@ -368,7 +378,7 @@ def preprocess_raw(raw, channels=None, filt=None, phys='ica-reg'):
     if 'eeg' in chs:
         print("Rereferencing EEG data to average reference")
         #raw = mne.add_reference_channels(raw, "REF")
-        raw.set_eeg_reference()
+        raw.set_eeg_reference(projection=False)
 
     # Physiological noise correction
     # =========================================================================
@@ -512,7 +522,18 @@ cov = emptyroom_cov(raw, filt, d['cov'])
 cov2 = emptyroom_cov(raw2, filt, d['cov'])
 covsss = emptyroom_cov(rawsss, filt, d['cov'])
 """
-
+def read_covariance(sd, cov_type='noise'):
+    
+    d = getd(sd, 'cov')
+    covf = getf(d, '*{}-cov.fif'.format(cov_type))
+    emptyroom = ['emptyroom' in f for f in covf]
+    
+    # MEG
+    cov
+    
+    
+    return f
+    
 
 def match_raw_and_emptyroom(emptyroom, raw):
     
@@ -542,6 +563,12 @@ def emptyroom_cov(raw, filt, outdir):
     
     """
     
+    if not op.exists(outdir):
+        os.makedirs(outdir)
+    figdir = op.join(outdir, 'figures')
+    if not op.exists(figdir):
+        os.mkdir(figdir)
+        
     if isinstance(raw, str):
         raw = mne.io.read_raw_fif(raw, preload=True)
     else:
@@ -550,25 +577,34 @@ def emptyroom_cov(raw, filt, outdir):
     print("Filtering")
     filt['fnotch'] = [f for f in filt['fnotch'] if f<=raw.info['sfreq']/2]
     print("Removing line noise at {} Hz".format(filt['fnotch']))
-    raw.notch_filter(filt['fnotch'])
+    raw.notch_filter(filt['fnotch'], fir_design='firwin')
     
     if filt['fmin'] is not None:
         print("Highpass filtering at {} Hz".format(filt['fmin']))
-        raw.filter(l_freq=filt['fmin'], h_freq=None)
+        raw.filter(l_freq=filt['fmin'], h_freq=None, fir_design='firwin')
     if filt['fmax'] is not None:
         print("Lowpass filtering at {} Hz".format(filt['fmax']))
-        raw.filter(l_freq=None, h_freq=filt['fmax'])
+        raw.filter(l_freq=None, h_freq=filt['fmax'], fir_design='firwin')
     
-    #chs = compute_misc.pick_func_channels(raw.info)
-    #cov_names = list()
-    #for ch, picks in chs.items():
-    #print("Computing covariance matrix")
-    noise_cov = mne.compute_raw_covariance(raw, method="shrunk")
-    noise_cov_name = op.join(outdir, 'emptyroom_noise-cov.fif')
-    noise_cov.save(noise_cov_name)
-    #cov_names.append(noise_cov_name)
+    chs = compute_misc.pick_func_channels(raw.info)
+    cov_names = list()
+    for ch, picks in chs.items():
+        print("Computing covariance matrix : {}".format(ch.upper()))
+        noise_cov = mne.compute_raw_covariance(raw, method="shrunk",
+                                               picks=picks)
+        noise_cov_name = op.join(outdir,
+                                 'emptyroom_{}_noise-cov.fif'.format(ch))
+        noise_cov.save(noise_cov_name)
+        cov_names.append(noise_cov_name)
+        
+        fig_cov, fig_eig = noise_cov.plot(raw.info, show=False)
+        fig_cov.savefig(op.join(figdir,
+                                "emptyroom_{}_noise-cov.png".format(ch)))
+        fig_eig.savefig(op.join(figdir,
+                                "emptyroom_{}_noise-eig.png".format(ch)))
+        plt.close('all')
     
-    return noise_cov
+    return cov_names
 
 
 
@@ -834,6 +870,11 @@ def cov_epochs(epochs, cov_type='noise', outdir=None):
     basename, outdir2, figdir = get_output_names(epochs)
     if outdir is None:
         outdir = outdir2
+    if not op.exists(outdir):
+        os.makedirs(outdir)
+    figdir = op.join(outdir, 'figures')
+    if not op.exists(figdir):
+        os.mkdir(figdir)
     
     epochs = mne.read_epochs(epochs)
 
@@ -847,10 +888,14 @@ def cov_epochs(epochs, cov_type='noise', outdir=None):
 
     cov = mne.compute_covariance(epochs, tmin=win[0], tmax=win[1],
                                  method="shrunk")
-    
     cov_name = op.join(outdir, "{}_{}-cov.fif".format(basename, cov_type))
     cov.save(cov_name)
-        
+    
+    fig_cov, fig_eig = cov.plot(epochs.info, show=False)
+    fig_cov.savefig(op.join(figdir, "{}_{}-cov.pdf".format(basename, cov_type)))
+    fig_eig.savefig(op.join(figdir, "{}_{}-eig.pdf".format(basename, cov_type)))
+    plt.close('all')
+    
     return cov_name
     
 def preprocess_xdawn(epochs, signal_cov, stim_delay=0):
@@ -1019,7 +1064,111 @@ def xdawn_cv(epochs, signalcov, component_grid=None, nfolds=5, cv_curve=True):
     else:
         return n_components_cv
     
+    
+def prepare_contrasts(sd, config):
+    
+    if isinstance(config['contrasts'], dict):
+        config['contrasts'] = [config['contrasts']]
+        
+    d = getd(sd, 'run_concat')
+    evoked = getf(d, 'apf*-ave.fif')
+    
+    print('Preparing {} contrast(s)'.format(len(config['contrasts'])))
+    cevo = []
+    for c in config['contrasts']:
+        for evo in evoked:
+            cevo.append(make_contrast(evo, **c))
+        
+    
+def make_contrast(evoked, c1=None, c2=None, c1_name=None, c2_name=None, outdir=None):
+    """
+    does the contrast c1 > c2 and saves the result.
+    
+    PARAMETERS
+    ----------
+    evoked : str
+        Filename of the evoked data from which to form contrasts.
+    c1 : str | list of str
+        (Exact) name of contrast(s).
+    c1 : str | list of str
+        (Exact) name of contrast(s).
+    c1_name : str
+        Name corresponding to c1. Mandatory if len(c1) > 1.
+    c2_name : str
+        Name corresponding to c1. Mandatory if len(c1) > 1.
+    """
+    if c1 is None and c2 is None:
+        raise ValueError
+        
+    if outdir is None:
+        outdir = op.dirname(evoked)
+    
+    if c1:
+        c1 = [c1] if not isinstance(c1, list) else c1
+    if c2:
+        c2 = [c2] if not isinstance(c2, list) else c2
+    
+    if c1 and c1_name is None:
+        assert len(c1) is 1, 'Cannot auto-name contrasts with multiple conditions'
+        c1_name = c1[0]
+    if c2 and c2_name is None:
+        assert len(c2) is 1, 'Cannot auto-name contrasts with multiple conditions'
+        c2_name = c2[0]
+    
+    if c1 is not None and c2 is not None:    
+        cfname = c1_name+'_vs_'+c2_name
+        ccname = c1_name+' > '+c2_name
+    elif c1:
+        cfname = ccname = c1_name
+    elif c2:
+        cfname = ccname = c2_name
+    cfname = cfname.replace(' ', '_')
+        
+    # Outputs
+    base = op.splitext(op.basename(evoked))[0]
+    outdir = op.join(outdir, cfname)
+    if not op.exists(outdir):
+        os.makedirs(outdir)
+    figdir = op.join(outdir, 'figures')
+    if not op.exists(figdir):
+        os.makedirs(figdir)
+    
+    evoked = mne.read_evokeds(evoked)
+    
+    # Get the contrasts
+    ename = [e.comment for e in evoked]
+    weights = np.zeros(len(evoked))
+    if c1:
+        weights[[ename.index(c) for c in c1]] = 1/len(c1)
+    if c2:
+        weights[[ename.index(c) for c in c2]] = -1/len(c2)
+               
+    #e1 = [e for c in c1 for e in evoked if e.comment == c]
+    #e2 = [e for c in c2 for e in evoked if e.comment == c]
+    
+    contrast = mne.combine_evoked(evoked, weights)
+    contrast.comment = ccname
+    contrast.save(op.join(outdir, base+'.fif'))
+    
+    # Make the new evoked object
+    #ec = e1[0]
+    #ec.comment = ccname
+    #ec.data = np.mean(np.asarray([e.data for e in e1]), axis=0)
+    #ec.data -= np.mean(np.asarray([e.data for e in e2]), axis=0)
+    #ec.save(op.join(outdir, base+'.fif'))
+    
+    # Plot
 
+    fig = contrast.plot(spatial_colors=True, exclude='bads', show=False)
+    #fig.axes[0].set_title("Evoked '{}' [{}]".format(ec.comment, ch.upper()))
+    #if len(chs) > 1:
+    #    fig.savefig(evo_cname+'_{}_.pdf'.format(ch))
+    #else:
+    fig.savefig(op.join(figdir, base+".pdf"))
+    plt.close()
+    
+    return contrast
+    
 
 def setup_runs(subject_dir):
     """
@@ -1114,10 +1263,17 @@ def getd(sd, k=None):
     d['run_concat'] = op.join(d['meeg'], 'run_concat')
     
     d['fwd'] = op.join(d['meeg'], 'forward')
-    d['src'] = op.join(d['fwd'], 'src')
-    d['gain'] = op.join(d['fwd'], 'gain')
-    d['headmodel'] = op.join(d['fwd'], 'headmodel')
-    d['coreg'] = op.join(d['fwd'], 'coreg')
+    
+    d['fwds'] = sorted(glob(op.join(d['fwd'], '*')), key=str.lower)
+    
+    d['inv'] = op.join(d['meeg'], 'inverse')
+    
+    #d['src'] = op.join(d['fwd'], 'src')
+    #d['gain'] = op.join(d['fwd'], 'gain')
+    #d['headmodel'] = op.join(d['fwd'], 'headmodel')
+    #d['coreg'] = op.join(d['fwd'], 'coreg')
+    
+    d['precomp'] = op.join(d['meeg'], 'precomputed')
     
     d['smri'] = op.join(sd, 'sMRI')
     
@@ -1135,16 +1291,22 @@ def getd(sd, k=None):
         d = d[k]
     return d
 
-def getf(path, pattern):
+def getf(path, pattern, recursive=False):
     """Recursive search for files matching 'pattern' in directory/ies 'sd'.
     """
     
     if isinstance(path, str):
-        f = glob(op.join(path,'**', pattern), recursive=True)
+        if recursive:
+            f = glob(op.join(path, '**', pattern), recursive=True)
+        else:
+            f = glob(op.join(path, pattern))
     elif isinstance(path, list):
         f = list()
         for p in path:
-            ff = glob(op.join(p,'**', pattern), recursive=True)
+            if recursive: 
+                ff = glob(op.join(p,'**', pattern), recursive=True)
+            else:
+                ff = glob(op.join(p, pattern))
             try:
                 f.append(ff[0])
             except IndexError:
@@ -1157,10 +1319,12 @@ def getf(path, pattern):
     else:
         return sorted(f, key=str.lower)
 
-def get_surfs(sd):
+def get_surfs(sd, config):
     """
     """
-    hm = getd(sd, 'headmodel')
+    df = getfwdd(sd, config)
+    hm = df['hm']
+    #hm = getd(sd, 'hm')
     
     surfs = getf(hm, '*.stl')
     keys = ['air', 'bone', 'csf', 'eyes', 'gm', 'skin',
@@ -1177,23 +1341,92 @@ def load_mrifids(mrifids):
         fids_mri[str(i,"utf-8").lower()] = ii
     return fids_mri
 
-def coreg(sd):
+def getfwdd(sd, config):
+    """
+    Setup directories for forward solution.
+    """
+    d = getd(sd)
+    fwd = op.join(d['fwd'], config['name'])
+    
+    df = dict()    
+    for k in ['hm', 'coreg', 'gain', 'src']:
+        df[k] = op.join(fwd, k)
+        if not op.exists(df[k]):
+            os.makedirs(df[k])
+    return df
+    
+def prepare_for_forward(sd, config):
+    """
+    
+    Move surface files
+    Move source space files
+    Move gain matrix
+        
+    """
+    d = getd(sd)
+    df = getfwdd(sd, config)
+    
+    # If there are no headmodel files, move if possible
+    if len(glob(op.join(df['hm'],'*'))) == 0:
+        # no headmodel files try to copy from hm_files...
+        surfs = glob(op.join(d['precomp'], config['name'], 'surfs','*'))
+        if len(surfs) == 0:
+            surfs = glob(op.join(d['precomp'], 'surfs', '*'))
+        for s in surfs:
+            dst = op.join(df['hm'], op.basename(s))
+            print('Copying {} to {}'.format(s,dst))
+            shutil.copy(s, dst)
+    else:
+        print('Head model surfaces already present.')
+    
+    # If there are no source space files, move if possible
+    if len(glob(op.join(df['src'], '*'))) == 0:
+        # no source space files
+        src = glob(op.join(d['precomp'] , config['name'], 'src','*'))
+        if len(src) == 0:
+            src = glob(op.join(d['precomp'], 'src', '*'))
+        for s in src:
+            d = op.join(df['src'], op.basename(s))
+            print('Copying {} to {}'.format(s,d))
+            shutil.copy(s, d)
+    else:
+        print('Source space files already present.')
+    
+    if config['precomp']:
+        # Copy precomputed gain matrix
+        srcgain = op.join(d['precomp'], config['name'], 'gain')
+        dstgain = glob(op.join(df['gain'], '*-fwd.fif'))
+        
+        if op.exists(srcgain) and len(dstgain) is 0:
+            # the the precomputed leadfield...
+            srcgain = glob(op.join(srcgain, '*-fwd.fif'))
+            assert len(srcgain) is 1
+            srcgain = srcgain[0]
+            
+            print('Copying precomputed gain matrix from {} to {}'.format(srcgain, dstgain))
+            dstgain = op.join(df['gain'], op.basename(srcgain))
+            shutil.copy(srcgain, dstgain) # or move..?
+    
+    return df
+    
+
+def coreg(sd, config):
     """
     
     sd : str
     
     """
     d = getd(sd)
-    
+    df = getfwdd(sd, config)
     
     # Get files
-    raw = getf(d['runs'][0], 'meeg_sss_raw.fif')
+    raw = getf(d['runs'][0], '*fmeeg_sss_raw.fif')
     info = mne.io.read_info(raw)
     mrifids = op.join(d['smri'], 'mri_fids.txt')
-    skin = get_surfs(sd)['skin']
+    skin = get_surfs(sd, config)['skin']
     
     # Run
-    trans = coregister(info, mrifids, skin, d['coreg'])
+    trans = coregister(info, mrifids, skin, df['coreg'])
     
     return trans
 
@@ -1294,32 +1527,32 @@ fname_src = [op.join(surf_dir, 'lh.central.T1fs_conform.gii'),
              op.join(surf_dir, 'rh.central.T1fs_conform.gii')]
 """
 
-def prepare_sourcespace(sd):
+def prepare_sourcespace(sd, config):
     
     
     #print('Preparing source space...')
-    
-    srcd = getd(sd, 'src')    
-    src = getf(srcd, '*')
+    df = getfwdd(sd, config)
+    src = getf(df['src'], '[lr]*')
     
     src = io_misc.sourcespace_from_files(src)
-    src_name = op.join(srcd, 'sourcespace-src.fif')
-    src.save(src_name)
+    src_name = op.join(df['src'], 'sourcespace-src.fif')
+    src.save(src_name, overwrite=True)
     
     return src
     
 
-def prepare_bem(sd):
+def prepare_bem(sd, config):
     """
     """
-    hm = getd(sd, 'headmodel')
-    surfs = get_surfs(sd)
+    df = getfwdd(sd, config)
+    surfs = get_surfs(sd, config)
     
-    bem = prepare_bem_mne(surfs['csf'], surfs['bone'], surfs['skin'], hm)
+    bem = prepare_bem_mne(surfs['csf'], surfs['bone'], surfs['skin'], df['hm'],
+                          config['conductivity'])
     
     return bem
 
-def prepare_bem_mne(brain, skull, scalp, outdir):
+def prepare_bem_mne(brain, skull, scalp, outdir, conductivity=(0.3, 0.006, 0.3)):
     """Compute BEM model using MNE.    
     """
     
@@ -1330,8 +1563,6 @@ def prepare_bem_mne(brain, skull, scalp, outdir):
            FIFF.FIFFV_BEM_SURF_ID_SKULL,
            FIFF.FIFFV_BEM_SURF_ID_HEAD]
     
-    conductivities = (0.3, 0.006, 0.3)
-    
     # Read surfaces for BEM
     surfs = []
     for surf in (brain, skull, scalp):
@@ -1340,7 +1571,7 @@ def prepare_bem_mne(brain, skull, scalp, outdir):
     
     
     print('Preparing BEM model...')
-    bem = mne.bem._surfaces_to_bem(surfs, ids, conductivities)
+    bem = mne.bem._surfaces_to_bem(surfs, ids, conductivity)
     print('Writing BEM model...')
     bem_name = op.join(outdir, "bem-surfs.fif")
     mne.write_bem_surfaces(bem_name, bem)
@@ -1350,20 +1581,23 @@ def prepare_bem_mne(brain, skull, scalp, outdir):
     print('Writing BEM solution...')
     bemsol_name = op.join(outdir, "bem-sol.fif")
     mne.write_bem_solution(bemsol_name, bem)
+    print('Done')
     
     return bem
 
     
-def prepare_forward(sd):
+def prepare_forward(sd, config):
     
-    d = getd(sd)
-    raw = getf(d['runs'][0], 'meeg_sss_raw.fif')    
-    src = getf(d['src'], '*-src.fif')
-    bem = getf(d['headmodel'], '*bem-sol.fif')
-    trans = getf(d['coreg'], '*-trans.fif')
+    d = getd(sd, 'runs')
+    df = getfwdd(sd, config)
     
-    fwd = prepare_forward_mne(raw, src, bem, trans, d['gain'])    
-
+    raw = getf(d[0], '*fmeeg_sss_raw.fif')  
+    src = getf(df['src'], '*-src.fif')
+    bem = getf(df['hm'], '*bem-sol.fif')
+    trans = getf(df['coreg'], '*-trans.fif')
+    
+    fwd = prepare_forward_mne(raw, src, bem, trans, df['gain'])
+    
     return fwd
 
 def prepare_forward_mne(raw, src, bem, trans, outdir):    
@@ -1383,17 +1617,18 @@ def prepare_forward_mne(raw, src, bem, trans, outdir):
     # MNE automatically projects EEG electrodes onto the scalp surface
     print('Computing forward solution')
     fwd = mne.make_forward_solution(raw.info, trans=trans, src=src, bem=bem,
-                                    meg=True, eeg=True, mindist=0, n_jobs=2)
+                                    meg=True, eeg=True, mindist=0, n_jobs=1)
     
-    # mne.convert_forward_solution(fwwd, surf_ori, force_fixed)
     print('Writing forward solution')
     fwd_name = op.join(outdir, "forward-fwd.fif")
     mne.write_forward_solution(fwd_name, fwd)
+    print('Done')
     
     return fwd
 
 
-
+######
+# =============================================================================
 
 
 def fit_dipole(evoked, noise_cov, bem, trans, times):
@@ -1488,7 +1723,258 @@ def fit_dipole(evoked, noise_cov, bem, trans, times):
     
     return 
 
-def do_inverse(evoked, noise_cov, fwd, times, method='dSPM', crop=True):
+def compute_whitener(inv, return_inverse=False):
+    
+    # Whitener
+    eig = inv['noise_cov']['eig']
+    nonzero = eig > 0
+    ieig = np.zeros_like(eig)
+    ieig[nonzero] = 1/np.sqrt(eig[nonzero])
+    ieig = np.diag(ieig)
+    eigvec = inv['noise_cov']['eigvec']
+    W = ieig @ eigvec
+    #W = eigvec.T @ ieig @ eigvec # what whiten_evoked does; projects it back to original space
+    
+    iW = eigvec.T @ np.diag(np.sqrt(eig))
+    
+    # such that iW @ W == I (approx.)
+    
+    if return_inverse:
+        return W, iW
+    else:
+        return W
+
+def compute_MNE_cost(evoked, inv, lambda2, twin):
+    """Compute the cost function of a minimum norm estimate. The cost function
+    is given by
+    
+        S = E.T @ E + lambda2 * J.T @ R**-1 @ J
+        
+    where E = X - Xe, i.e., the error between the actual data, X, and the data
+    as estimated (predicted) from the inverse solution, lambda2 is the
+    regularization coefficient, J is the (full) current estimate (i.e., the
+    inverse solution), and R is the source covariance which depends on the
+    particular MNE solver.
+    
+    MNE employs data whitening and SVD of the gain matrix. 
+    
+    
+    
+    See also
+    
+        https://martinos.org/mne/stable/manual/source_localization/inverse.html
+        
+        
+    inv : *Prepared* inverse operator
+    
+    """
+    
+    """
+    evoked = mne.read_evokeds('/mrhome/jesperdn/wakeman_henson_meeg_test/Sub02/MEEG/run_concat/Faces_vs_Scrambled_Faces/apfmeeg_sss_raw_eeg-ave.fif')
+    noise_cov = mne.read_cov('/mrhome/jesperdn/wakeman_henson_meeg_test/Sub02/MEEG/cov/pfmeeg_sss_raw_noise-cov.fif')
+    fwd = mne.read_forward_solution('/mrhome/jesperdn/wakeman_henson_meeg_test/Sub02/MEEG/forward/BEM_005_0.0319/gain/forward-fwd.fif')
+    evo=evoked[0]
+    twin=[0.15,0.19]
+    method='MNE'
+    """
+    if twin is not None:
+        assert len(twin) is 2
+        tidx = evoked.time_as_index(twin)
+        X = evoked.data[:,slice(*tidx)]
+    else:
+        X = evoked.data
+    #nave = evoked.nave
+    
+    # SVD gain matrix
+    U = inv['eigen_fields']['data'].T # eigenfields
+    V = inv['eigen_leads']['data']    # eigenleads
+    S = inv['sing']                   # singular values
+
+    
+    #gamma_reg = S / (S**2 + lambda2)  # Inverse, regularized singular values
+    gamma_reg = inv['reginv']
+    Pi = S * gamma_reg                # In the case of lambda2 == 0, Pi = I
+    
+    # Source covariance
+    R = inv['source_cov']['data'][:,None]
+    iR = 1/R
+    
+    
+    # Whitening operator
+    W, iW = compute_whitener(inv, return_inverse=True)
+    
+    # Inverse operator
+    M = np.sqrt(R) * V * gamma_reg[None,:] @ U.T    
+    
+    
+    # Current estimate (the inverse solution)
+    J = M @ W @ X
+       
+    # Estimated (predicted) data from the inverse solution. If lambda2 == 0,
+    # then this equals the actual data. If lambda2 > 0, there will be some
+    # deviation (error) from this.
+    Xe = iW @ U * Pi[None,:] @ U.T @ W @ X
+
+    """
+    # ALTERNATIVE
+    # Calculating the estimated (predicted) data from the (full, i.e., all
+    # components, x, y, z) inverse solution is done like so:
+    
+    # Get the solution ('sol') from mne.minimum_norm.inverse line 795. Don't
+    # apply noise_norm to sol. Then undo source covariance (depth) weighting.
+    # MNE also weights by the effective number of averages ('nave') such that
+    # R = R / nave that thus iR = 1/R * nave, however, since we are using a
+    # *prepared* inverse operator, R has already been scaled by nave so no need
+    # to undo this manually.
+    J /= np.sqrt(R)
+    
+    # Calculate the whitened (and weighted) gain matrix
+    # Note that the eigenfields are transposed, such that U is in fact
+    # inv['eigen_fields']['data'].T. We get    
+    G = U * S[None,:] @ V.T
+    
+    # To be clear,
+    #
+    #   inv['eigen_fields'] - stores U.T
+    #   inv['eigen_leads']  - stores V
+    # 
+    # such that
+    # 
+    #     gain = USV.T
+    
+    # Finally, the estimated (recolored) data is obtained from
+    Xe = iW @ G @ J
+    """
+    #
+    # Cost function
+    # 
+    # The prediction term
+    E = X - Xe    # Error
+    WE = W @ E    # White error
+    
+    # Cost in 'twin' or over all time points
+    cost = np.sum(WE**2) + lambda2 * np.sum(J**2 * iR)
+    
+#    plt.figure()
+#    plt.subplot(3,1,1)
+#    plt.plot(X.T*1e6)
+#    plt.subplot(3,1,2)
+#    plt.plot(Xe.T*1e6)
+#    plt.subplot(3,1,3)
+#    plt.plot(E.T*1e6)
+    
+    return cost
+
+
+def get_noise_covs(covd, mods):
+    
+    # Choose modality specific noise covariance matrices over general
+    # Nested list comprehensions...
+    noise_cov = []
+    noise_cov_all = getf(covd, '*noise-cov.fif', recursive=False)
+    if isinstance(noise_cov_all, str):
+        noise_cov = [noise_cov_all]*len(mods)
+    else:
+        noise_cov_empty = [n for n in noise_cov_all if 'emptyroom' in n]
+        noise_cov_spe = [n for n in noise_cov_all if not 'emptyroom' in n and any([m for m in mods if m in op.basename(n)])]
+        noise_cov_gen = [n for n in noise_cov_all if not any([m for m in mods if m in op.basename(n)])]
+        # We can only have one 'general' noise covariance matrix file
+        assert len(noise_cov_gen) in [0, 1], 'Number of general noise covs was {}'.format(len(noise_cov_gen))
+        
+        for m in mods:
+            add = []
+            # First, try if there is empty room data for this modality
+            add = [n for n in noise_cov_empty if m in op.basename(n)]
+            if not any(add):
+                # If not, try an other modality specific covariance matrix
+                add = [n for n in noise_cov_spe if m in op.basename(n)]
+            if not any(add):
+                # If not, use the general covariance (which supposedly contains
+                # more than one modality)
+                add = noise_cov_gen
+            noise_cov += add
+            
+    return noise_cov
+
+def prepare_inverse(sd, config, i=None):
+    """
+    
+    If i == None, prepare inverse solution only for the ith forward model.
+    Otherwise, do it for all forward models.
+    
+    """
+    # get the input evoked
+    # get the noise covariance
+    # get the fwd models for which to compute inverse sol
+    
+    # which fwd models...
+    if i is None:
+        i = 0
+        
+    d = getd(sd)
+    cd = d['run_concat']
+    if config['contrast'] is not None:
+        cd = op.join(cd, config['contrast'])
+    
+    evoked = getf(cd, 'apf*-ave.fif')
+    if not any(evoked):
+        raise IOError('No evoked data found.')
+    mods = ['_'+op.basename(e).split('-')[0].split('_')[-1]+'_' for e in evoked]
+    
+    noise_cov = get_noise_covs(d['cov'], mods)
+    if not any(noise_cov):
+        raise IOError('No covariance data found.')
+        
+    print('Preparing inverse solution')
+    fwdd = d['fwds'][i]
+    fwd = getf(op.join(fwdd, 'gain'), '*-fwd.fif')
+    fwdb = op.basename(fwdd)
+    outdir = op.join(d['inv'], config['contrast'], config['method'], fwdb)
+    
+    if not any(fwd):
+        raise IOError('Gain matrix not found.')
+    
+    print(op.basename(fwdb))
+    for evo, cov in zip(evoked, noise_cov):
+        cost = do_inverse(evo, cov, fwd, twin=config['twin'],
+                          method=config['method'],
+                          fwd_normal=config['fwd_normal'], outdir=outdir)
+            
+    print('Done')
+    
+    return cost
+    
+def plot_inverse(sd, config, i=None):
+    
+    # name of fwd
+    # name of stc
+    # times
+    if i is None:
+        i = 0
+        
+    d = getd(sd)
+    
+    fwdd= d['fwds'][i]
+    fwdb = op.basename(fwdd)
+    print(fwdb)
+    
+    # Source space
+    srcd = getfwdd(sd, dict(name=fwdb))['src']
+    src = getf(srcd, '[lr]*')
+    
+    # Source estimate
+    invd = op.join(d['inv'], config['contrast'], config['method'], fwdb)
+    stc = getf(invd, '*stc')
+    stc = [s.rstrip('-[lr]h.stc') for s in stc]
+    stc = list(set(stc))
+    
+    for s in stc:
+        plot_stc(s, src, config['twin'])
+            
+
+def do_inverse(evoked, noise_cov, fwd, twin, method='dSPM', signal_cov=None,
+               fwd_normal=False,
+               crop=False, outdir=None):
     """
     
     time : float | list
@@ -1507,166 +1993,172 @@ def do_inverse(evoked, noise_cov, fwd, times, method='dSPM', crop=True):
     # mne.beamformer.lcmv() # noise_cov
     # mne.beamformer.dics() # noise_csd
     # mne.beamformer.rap_music() # noise_cov
-    
-    basename, outdir, figdir = get_output_names(evoked)
-    outdir = op.join(outdir, 'source_estimates')
+    basename, _, _ = get_output_names(evoked)
+
+    # Output directories
+    if outdir is None:
+        outdir = op.dirname(evoked)
     if not op.exists(outdir):
         os.makedirs(outdir)
+    figdir = op.join(outdir, 'figures')
+    if not op.exists(figdir):
+        os.mkdir(figdir)
+    
     evoked = mne.read_evokeds(evoked)
     
     if isinstance(noise_cov, str):
         noise_cov = mne.read_cov(noise_cov)
     if isinstance(fwd, str):
         fwd = mne.read_forward_solution(fwd)
-
+    if isinstance(signal_cov, str):
+        signal_cov = mne.read_cov(signal_cov)
+        
+    if fwd_normal:
+        print('Converting forward solution to surface normals')
+        fwd = mne.forward.convert_forward_solution(fwd, surf_ori=True, force_fixed=True)
+        
+    if method == 'LCMV':
+        assert signal_cov is not None, 'Signal covariance must be provided with LCMV beamformer'
+        
+    # Timings
     try:
-        assert len(times) is 2
-        tidx = evoked[0].time_as_index(times)
+        assert len(twin) is 2
+        tidx = evoked[0].time_as_index(twin)
     except TypeError:
-        times = [times, times]
-        tidx = evoked[0].time_as_index(times)
+        twin = [twin, twin]
+        tidx = evoked[0].time_as_index(twin)
         tidx[1] += 1
     tslice = slice(*tidx)
-    tms = np.asarray(times)*1e3
+    tms = np.asarray(twin)*1e3
     
     print('Computing inverse solution')
-    print('Method : {}'.format(method))
+    print('Method    : {}'.format(method))
     
     stcs = list()
     for evo in evoked:
         condition = evo.comment
-        print('Conditions : {}'.format(condition))
+        print('Condition : {}'.format(condition))
         
         # Plot whitening
         fig = evo.plot_white(noise_cov, show=False)
         fig.set_size_inches(8,10)
-        fig.savefig(op.join(figdir, '{}_whitening_{}').format(basename, condition))
+        fig.savefig(op.join(figdir, '{}_whitened').format(basename))
         plt.close('all')
         
-        # Make an MEG inverse operator
-        print("Making inverse operator")
-        inv = mne.minimum_norm.make_inverse_operator(evo.info, fwd, noise_cov,
-                                                     loose=None, depth=None, fixed=False)
+        if method in ['MNE', 'dSPM', 'sLORETA']:
+            #
+            # Minimum norm estimate
+            #
+            
+            # Make an MEG inverse operator
+            print("Making inverse operator")
+            inv = mne.minimum_norm.make_inverse_operator(evo.info, fwd, noise_cov,
+                                                         loose=None, depth=None,
+                                                         fixed=fwd_normal)
+            
+            # Estimate SNR
+            print("Estimating SNR at {} ms".format(tms))
+            snr, snr_est = mne.minimum_norm.estimate_snr(evo, inv)
+            snr_estimate = snr[tslice].mean()
+            print('Estimated SNR at {} ms is {:.2f}'.format(tms, snr_estimate))
         
-        # Estimate SNR
-        print("Estimating SNR at {} ms".format(tms))
-        snr, snr_est = mne.minimum_norm.estimate_snr(evo, inv)
-        snr_estimate = snr[tslice].mean()
-        print('Estimated SNR at {} ms is {:.2f}'.format(tms, snr_estimate))
-    
-        # Apply the operator
-        lambda2 = 1/snr_estimate**2
+            # Apply the operator
+            lambda2 = 1/snr_estimate**2
+            
+            print("Preparing inverse operator")
+            inv = mne.minimum_norm.prepare_inverse_operator(inv, evo.nave, lambda2, method)
+            
+            print("Applying inverse operator")
+            stc = mne.minimum_norm.apply_inverse(evo, inv, lambda2, method, prepared=True)
+            
+            print('Computing cost function')
+            cost = compute_MNE_cost(evo, inv, lambda2, twin)
+            print('Cost : {}'.format(cost))
+            
+        elif method == 'LCMV':
+            #
+            # Beamformer
+            # 25151894.97133616
+            # 24317832.418909758
+            stc = mne.beamformer.lcmv(evo, fwd, noise_cov, signal_cov, reg=0.05,
+                                      pick_ori=None)
         
-        print("Applying inverse operator")
-        stc = mne.minimum_norm.apply_inverse(evo, inv, lambda2, method)
         if crop:
-            print('Cropping to {}'.format(times))
-            stc.crop(*times) # to save space
+            print('Cropping to {}'.format(twin))
+            stc.crop(*twin) # to save space
             
         print("Writing source estimate")
-        stc_name = op.join(outdir, '{}_{}'.format(basename, condition))
+        stc_name = op.join(outdir, basename)
         stc.save(stc_name)
         stcs.append(stc_name)
         
+        
+        np.savetxt(op.join(outdir, 'cost_'+basename+'.txt'), np.asarray([cost]))
+        
+        # if plot:
+        #     ...
+        
         #
-        #idx = stc.data[:, times_slice].mean(1).argsort()[::-1][:100]
+        #idx = stc.data.mean(1).argsort()[::-1][:100]
         #plt.figure()
         #plt.plot(stc.times, stc.data[idx].T)
         #plt.show()
         
-    return stcs
-
-def form_contrast( condition1, condition2 ):
+    return cost
     
-    condition1 = [condition1] if not isinstance(condition1, list) else condition1
-    condition2 = [condition2] if not isinstance(condition2, list) else condition2
+def simulate_data(raw, fwd):
+    """
+    """
+    raw = '/home/jesperdn/wakeman_henson_meeg_test/Sub02/MEEG/run_01/pfmeeg_sss_raw.fif'
+    evoked = '/home/jesperdn/wakeman_henson_meeg_test/Sub02/MEEG/run_concat/apfmeeg_sss_raw_eeg-ave.fif'
+    fwd = '/home/jesperdn/wakeman_henson_meeg_test/Sub02/MEEG/forward/BEM_007_0.0458/gain/forward-fwd.fif'
+    noise_cov = '/home/jesperdn/wakeman_henson_meeg_test/Sub02/MEEG/cov/pfmeeg_sss_raw_noise-cov.fif'
     
-    # Read STC
-    cond1 = list()
-    for c in condition1:
-        if isinstance(c, str):
-            cond1.append(mne.read_source_estimate(c))
-    cond2 = list()
-    for c in condition2:
-        if isinstance(c, str):
-            cond2.append(mne.read_source_estimate(c))
-    
-    # Average internally
-    
-    c1 = np.mean(np.asarray([c.data for c in cond1]),axis=0)
-    c2 = np.mean(np.asarray([c.data for c in cond2]),axis=0)
-    
-    # Form the contrast
-    c3 = cond1[0]
-    c3._data = c1-c2
-    
-    return c3
-
-def form_contrast_evoked(evoked1, evoked2, contrast_name=None):
-
-    evoked1 = [evoked1] if not isinstance(evoked1, list) else evoked1
-    evoked2 = [evoked2] if not isinstance(evoked2, list) else evoked2
-    
-    evoked_contrast = evoked1[0]
-    evoked_contrast.comment = contrast_name
-    evoked_contrast.data = np.mean(np.asarray([e.data for e in evoked1]), axis=0)
-    evoked_contrast.data -= np.mean(np.asarray([e.data for e in evoked2]), axis=0)
-    
-    return evoked_contrast
-
-def familiar_vs_unfamiliar_evoked(evoked):
-
-    evoked_contrast_name = evoked.split('-ave')[0]+'_Familiar_vs_Unfamiliar-ave.fif'
-    evoked = mne.read_evokeds(evoked)
-    
-    familiar = [e for e in evoked if 'Familiar' in e.comment]
-    unfamiliar = [e for e in evoked if 'Unfamiliar' in e.comment]
+    #### raw as template
+    raw = mne.io.read_raw_fif(raw)
+    info = raw.info
+    fwd = mne.read_forward_solution(fwd, force_fixed=True, surf_ori=True)
+    nave = 100
+    #iir_filter = 
+    noise_cov = mne.read_cov(noise_cov)
     
     
-    evoked_contrast = form_contrast_evoked(familiar, unfamiliar, 'Familiar > Unfamiliar')    
-    evoked_contrast.save(evoked_contrast_name)
+    rng = np.random.RandomState(42)
     
-    return evoked_contrast_name
-
-def faces_vs_scrambled_evoked(evoked):
-
-    evoked_contrast_name = evoked.split('-ave')[0]+'_Faces_vs_Scrambled-ave.fif'
-    evoked = mne.read_evokeds(evoked)
+    start, stop = -0.2, 0.5
     
-    faces = [e for e in evoked if 'Familiar' in e.comment or 'Unfamiliar' in e.comment]
-    scrambled = [e for e in evoked if 'Scrambled' in e.comment]
+    sfreq = raw.info['sfreq']
+    times = np.linspace(start, stop, np.round((stop-start)*sfreq).astype(int))
     
-    evoked_contrast = form_contrast_evoked(faces, scrambled, 'Faces > Scrambled')
-    evoked_contrast.save(evoked_contrast_name)
+    #times = np.arange(300, dtype=np.float) / raw.info['sfreq'] - 0.1
     
-    return evoked_contrast_name
-
-def faces_vs_scrambled(stcs):
+    plt.figure()
+    plt.plot(times, stc.data.T)
+    plt.show()
     
-    #stcs = glob(op.join(subject_dir, 'MEEG', 'source_estimates', '*eeg*.stc'))
+    stc = mne.simulation.simulate_sparse_stc(fwd['src'], n_dipoles=2,
+                                             times=times, random_state=42, data_fun=data_fun)
+    evoked = mne.simulation.simulate_evoked(fwd, stc, info, noise_cov, nave)
+    evoked.set_eeg_reference()
     
-    faces = [s for s in stcs if 'Familiar' in s or 'Unfamiliar' in s]
-    scrambled = [s for s in stcs if 'Scrambled' in s]
     
-    stc = form_contrast(faces, scrambled)
-    stc_name = scrambled[0].rstrip('Scrambled')+'Faces_vs_Scrambled'
-    stc.save(stc_name)
-    
-    return stc_name
-
-def familiar_vs_unfamiliar(stcs):
-    familiar = [s for s in stcs if 'Familiar' in s]
-    unfamiliar = [s for s in stcs if 'Unfamiliar' in s]
-    
-    stc = form_contrast(familiar, unfamiliar)
-    stc_name = familiar[0].rstrip('Familiar')+'Familiar_vs_Unfamiliar'
-    stc.save(stc_name)
-    
-    return stc_name
     
 
-
-def plot_stc(stc, src, times, vol=None):
+def data_fun(times):
+    """Function to generate random source time courses"""
+    
+    sine = 50e-9 * np.sin(30. * times)
+    
+    peak = 0.17
+    peakshift = 0.05
+    duration = 0.005 # standard deviation of gaussian
+    gaussian = np.exp(-(times - peak + peakshift * rng.randn(1)) ** 2 / duration)
+    return sine * gaussian
+            
+    
+    
+    
+def plot_stc(stc, src, twin, vol=None):
     """
     
     src : str | list | mne.SourceSpaces
@@ -1681,9 +2173,9 @@ def plot_stc(stc, src, times, vol=None):
     stc = mne.read_source_estimate(stc)
     
     # Times
-    tidx = stc.time_as_index(times)
-    tms = [np.round(t*1e3).astype(int) for t in times]
-    tms = '-'.join([str(t) for t in tms])
+    tidx = stc.time_as_index(twin)
+    tms = [np.round(t*1e3).astype(int) for t in twin]
+    tms = '_'.join([str(t) for t in tms])
     
     
     if type(src) == mne.SourceSpaces:
@@ -1746,11 +2238,12 @@ def plot_stc(stc, src, times, vol=None):
         print('Writing to VTK...', end=' ')
         for v,f,d,n in zip(vertices, faces, data, names):  
             vtk = io_misc.as_vtk(v, f, **d)
-            vtk_name = op.join(figdir, basename+'_{}_{}'.format(n, tms))
+            vtk_name = op.join(figdir, basename+'_{}-{}'.format(tms, n))
             vtk.tofile(vtk_name, 'binary')
         print('Done') 
         
     else:
+        import nibabel as nib
         vol = nib.load(vol)
         aff = vol.affine
         dim = vol.shape
@@ -1805,14 +2298,14 @@ def plot_stc(stc, src, times, vol=None):
             data = dict(celldata=dict(stc=data))
         data = [data]
         names = ['']
-        
-    print('Writing to VTK...', end=' ')
-    for v,f,d,n in zip(vertices, faces, data, names):  
-        vtk = io_misc.as_vtk(v, f, **d)
-        vtk_name = op.join(outdir, basename+'_{}_{}'.format(n, tms))
-        vtk.tofile(vtk_name, 'binary')
-    print('Done')    
-    """
+    """    
+    #print('Writing to VTK...', end=' ')
+    #for v,f,d,n in zip(vertices, faces, data, names):  
+    #    vtk = io_misc.as_vtk(v, f, **d)
+    #    vtk_name = op.join(outdir, basename+'_{}_{}'.format(n, tms))
+    #    vtk.tofile(vtk_name, 'binary')
+    #print('Done')
+
 #%% MaxFilter ...
 """
 sss = dict(movement_correction=True,
@@ -1928,3 +2421,365 @@ if noise_cov is not None:
         fig.set_size_inches(10,10)
         fig.save(op.join(save_fig, "{}_noise-cov_{}.pdf".format(raw_base, which)))
 """
+
+#%%
+
+
+def prepare_basis_functions(fwd, surface_lh, surface_rh, sigma=0.6, min_dist=3, exp_degree=8, random_seed=0,
+                            write=True, symmetric_sources=False):
+    """
+    
+    sigma : 
+        the 'amount' of activity to propagate
+    min_dist : 
+        minimum distance between basis functions (counted in mesh edges)
+    exp_degree :
+        number of edge expansions to do for each basis function...
+    random_seed : 
+        For reproducible results.
+    write : 
+        Write
+    symmetric_sources : bool
+        
+    
+    """
+    
+    # convert to surface normal
+    #fwd = mne.forward.convert_forward_solution(fwd, surf_ori=True, force_fixed=True)
+    
+    v_lh, f_lh = io_misc.read_surface(surface_lh)
+    v_rh, f_rh = io_misc.read_surface(surface_rh)
+    
+    print('Selecting vertices')
+    centers_lh = select_vertices(f_lh, min_dist, random_seed)
+    if symmetric_sources:
+        centers_rh = match_opposite_hemisphere(centers_lh, surface_lh, surface_rh)
+    else:
+        centers_rh = select_vertices(f_rh, min_dist, random_seed)
+    
+    B_lh = make_basis_functions(surface_lh, centers_lh, sigma, exp_degree, write)
+    B_rh = make_basis_functions(surface_rh, centers_rh, sigma, exp_degree, write)
+    B = [B_lh, B_rh]
+    
+    if symmetric_sources:
+        #B_bi = ss.vstack([B_lh, B_rh])
+        B.append(ss.vstack([B_lh, B_rh]))
+        
+    # Support over vertices
+    #plt.figure(); plt.hist(B_lh.sum(1),100); plt.show()
+    
+    # Number of basis functions overlapping with each vertice
+    #plt.figure(); plt.hist(B_lh.getnnz(1),100); plt.show()
+    
+    D = project_forward_to_basis(fwd, B, make_bilateral=symmetric_sources)
+
+    return D, B
+
+
+def project_forward_to_basis(fwd, basis, make_bilateral=False):
+    """Project forward solution from a source space onto a set of spatial basis
+    functions. Implements
+    
+        D = AB
+    
+    where A [K x N] is the gain matrix, B [N x C] is the spatial basis
+    functions, and D [K x C] is the gain matrix projected onto B.
+    
+    A may be [K x 3N] so B may need to be expanded to accomodate this.
+    
+    Here K sensors, N source locations, and C basis function.
+    
+    basis : list | scipy sparse matrix
+        List of basis sets (each containing a number of basis functions).
+        Should match the number of source spaces in 'fwd'.
+    make_bilateral : bool
+        Make a summed forward projection in addition to those contained in
+        'basis'.
+        
+    """
+    
+    if isinstance(fwd, str):
+        fwd = mne.read_forward_solution(fwd)
+    if not isinstance(basis, list):
+        basis = [basis]
+    nbases = len(basis)
+    nchs = len(fwd['info']['chs'])
+    
+    # Determine number of sources per location
+    if fwd['source_ori'] is FIFF.FIFFV_MNE_FIXED_ORI:
+        spl = 1
+    elif fwd['source_ori'] is FIFF.FIFFV_MNE_FREE_ORI:
+        spl = 3
+    
+    # Make the iteration items of source space lengths and basis functions
+    src_sizes = [s['np'] for s in fwd['src']]
+    if nbases is len(fwd['src']):
+        iter_items = zip(src_sizes, basis)
+    elif nbases is 1 and basis[0].shape[0]*spl == fwd['sol']['data'].shape[1]:
+        iter_items = zip( [sum(src_sizes)]  , basis )
+    else:
+        raise ValueError('Basis functions do not seem to match forward solution.')
+    
+    print('Projecting forward solution')
+    gains = list()
+    initcols = slice(0,0)
+    for s,b in iter_items:
+        gain = np.zeros((nchs, b.shape[1]*spl))
+        for i in range(spl):
+            cols = slice(i+initcols.start, initcols.stop+s*spl, spl)
+            gain[:,i::spl] = ss.csc_matrix.dot(fwd['sol']['data'][:,cols], b)
+        gains.append(gain)
+        initcols = slice(cols.stop, cols.stop)
+    
+    if make_bilateral:
+        gains.append( sum(gains) )
+    
+    gains = np.concatenate(gains, axis=1)
+    #fwd['sol']['data'] = gains
+    #fwd['nsource'] = 
+    
+    return gains
+
+
+def project_back_sourceestimate(invsol, basis):
+    """Project an inverse solution from source space back to sensor space.
+    
+    invsol : 
+        Inverse solution array of N sources by K time points.
+    basis : list
+        List of sparse arrays defininf the basis functions.
+    scale : 
+        Scaling vector describing the sum of the original forward solution per
+        basis function (which was normalized to one). Now that we are
+        projecting back, we want to get back to the same scaling.
+    
+    
+    """
+    
+    # 4000 x 1 or 4000 x time...
+    # invsol
+    #
+    if not isinstance(basis, list):
+        basis = [basis]
+    
+    invsol = np.atleast_2d(invsol)
+        
+    print('Projecting source estimates to original sources space')
+    
+    # inverse solution in nano ampere?
+    nA = 1#1e9
+       
+    # rows in inverse solution
+    nsol = invsol.shape[0]
+    # n basis functions
+    nsrc = sum([b.shape[1] for b in basis])
+    
+    spl = nsol//nsrc
+    ninvsol = list()
+    initcols = slice(0,0)
+    for b in basis:
+        isol = np.zeros((b.shape[0]*spl, invsol.shape[1]))
+        for i in range(spl):
+            cols = slice(i+initcols.start, initcols.stop+b.shape[1]*spl, spl)
+            isol[i::spl,:] = b.dot(invsol[cols]) * nA
+        ninvsol.append(isol)
+        initcols = slice(cols.stop, cols.stop)
+    #ninvsol = np.concatenate(ninvsol,axis=0)    
+    
+    return ninvsol
+
+def make_basis_functions(f, centers, sigma=0.6, degree=8, write=False):
+    """
+    
+    """
+    
+    if isinstance(f, str):
+        base, _ = op.splitext(f)
+        v, f = io_misc.read_surface(f)
+    else:
+        write = False
+        warn('Cannot write if surface is not a filename.')
+    
+    assert degree >= 1
+    
+    A = make_adjacency_matrix(f)
+    A = A*sigma
+    
+    # Add diagonal
+    A += ss.eye(*A.shape)
+    
+    # Keep only the basis functions we wish to use
+    B = A[centers]
+    for i in range(2,degree+1):
+        B += B.dot(A)/i
+    
+    # Normalize basis functions
+    B = B.multiply(1/B.sum(1))
+    B = B.T.tocsc()
+    
+    # Threshold
+    B = B.multiply(B>np.exp(-8))
+    
+    # Calculate some statistics on the support of each source
+    support = B.getnnz(1)
+    print('Source Support (# bases)')
+    print('Min  : {:d}'.format(support.min()))
+    print('Mean : {:.2f}'.format(support.mean()))
+    print('Max  : {:d}'.format(support.max()))
+    
+    support = B.sum(1)
+    print('Source Support (Weight)')
+    print('Min  : {:.3f}'.format(support.min()))
+    print('Mean : {:.3f}'.format(support.mean()))
+    print('Max  : {:.3f}'.format(support.max()))
+    
+    if write:
+        print('Writing to disk...', end=' ')
+        
+        origin = np.zeros(B.shape[0])
+        origin[centers] = 1
+        basis = np.asarray(B.sum(1)).squeeze()
+        vtk = io_misc.as_vtk(v, f, pointdata=dict(origin=origin, basis=basis))
+        
+        vtk.tofile(base+'_basis', 'binary')        
+        print('Done')
+
+    return B
+
+def match_opposite_hemisphere(targets, src, dst):
+    """Find the vertices of 'dst' closest to the 'target' vertices in 'src'. 
+    
+    """
+    if isinstance(src, str):
+        sv, sf = io_misc.read_surface(src)
+    if isinstance(dst, str):
+        dv, df = io_misc.read_surface(dst)
+        
+    # Get offset from x=0 of src
+    sx_offset = sv[:,0].max(0)
+    sv[:,0] -= sx_offset
+
+    # Get the vertices in src and mirror the coordinate around x=0
+    stargets = sv[targets]
+    stargets[:,0] = -stargets[:,0]
+    
+    # Get offset from x=0 of dst
+    dx_offset = dv[:,0].min(0)
+    dv[:,0] -= dx_offset
+    
+    # Find the closes match in dst
+    tree = cKDTree(dv)
+    d, dtargets = tree.query(np.atleast_2d(stargets))
+    
+    print('Targets found in destination')
+    print('Distance (min)  : {:.2f}'.format(d.min()))
+    print('Distance (mean) : {:.2f}'.format(d.mean()))
+    print('Distance (max)  : {:.2f}'.format(d.max()))
+    
+    return dtargets
+
+def make_adjacency_matrix(f):
+    """Make sparse adjacency matrix for vertices with connections f.
+    """    
+    N = f.max()+1
+    
+    row_ind = np.concatenate((f[:,0],f[:,0],f[:,1],f[:,1],f[:,2],f[:,2]))
+    col_ind = np.concatenate((f[:,1],f[:,2],f[:,0],f[:,2],f[:,0],f[:,1]))
+    
+    #row_ind = np.concatenate((f[:,0],f[:,0],f[:,1]))
+    #col_ind = np.concatenate((f[:,1],f[:,2],f[:,2]))
+    
+    A = ss.csr_matrix((np.ones_like(row_ind), (row_ind, col_ind)), shape=(N,N))
+    A[A>0] = 1
+    
+    return A
+
+def select_vertices(f, min_dist=3, random_seed=None):
+    """Select vertices from 'f' that are a minimum of 'min_dist' from each
+    other.    
+    """
+    A = make_adjacency_matrix(f)
+    idx = reshape_sparse_indices(A)
+    
+    # Ensure that (1) A includes diagonal, (2) A is binary
+    if any(A.diagonal()==0):
+        A += ss.eye(*A.shape)
+    A = A.multiply(A>0)
+    
+    # 
+    if random_seed is not None:
+        assert isinstance(random_seed, Integral)
+        np.random.seed(random_seed)
+        
+    # vertex enumerator
+    venu = np.arange(A.shape[0])
+    
+    vertices_left = np.ones_like(venu, dtype=bool)
+    vertices_used = np.zeros_like(venu, dtype=bool)
+    
+    #B = recursive_dot(A, A, recursions=min_dist-1)
+
+    while any(vertices_left):
+        i = np.random.choice(venu[vertices_left])
+        vertices_used[i] = True
+        
+        # Find neighbors and remove remove those
+        #if min_dist > 1:
+        #    B = recursive_dot(A[i], A, min_dist-1)
+        #else:
+        #    B = A[i]
+        #vertices_left[B.indices] = False
+        
+        
+        vertices_left[recursive_index(idx, i, min_dist)] = False
+    
+    return np.where(vertices_used)[0]
+
+def recursive_dot(A, B, recursions=1):
+    """Recursive dot product between A and B, i.e.,
+    
+        A.dot(B).dot(B) ...
+    
+    as determined by the recursions arguments. If recursions is 1, this
+    corresponds to the usual dot product.
+    """
+    
+    assert isinstance(recursions, Integral) and recursions > 0
+    
+    if recursions is 1:
+        return A.dot(B)
+    else:
+        return recursive_dot(A.dot(B), B, recursions-1)
+
+
+def recursive_index(indices, start, recursions=1, collapse_levels=True):
+    """Recursively index into 'indices' starting from (and including) 'start'.
+        
+    """
+    assert recursions >= 0
+
+    #start = [start] if not isinstance(start, list) else start
+ 
+    levels = list()
+    levels.append([start])
+
+    i = 0
+    while i < recursions:
+        ith_level = set()
+        for j in levels[i]:
+            ith_level.update(indices[j])
+        ith_level.difference_update(flatten(levels)) # remove elements from rings
+        
+        levels.append(list(ith_level))
+        i+=1
+    
+    return flatten(levels) if collapse_levels else levels
+
+def reshape_sparse_indices(A):
+    """Reshape indices of sparse matrix to list."""
+    return [A.indices[slice(A.indptr[i],A.indptr[i+1])].tolist() for i in range(len(A.indptr)-1)]
+
+def flatten(l):
+    """Flatten list of lists.
+    """
+    return [item for sublist in l for item in sublist]
