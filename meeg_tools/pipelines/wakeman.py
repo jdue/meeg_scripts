@@ -1122,6 +1122,7 @@ def xdawn_cv(epochs, signal_cov, component_grid=None, nfolds=5, cv_curve=True):
                 
                 xd = mne.preprocessing.Xdawn(n_components, signal_cov, correct_overlap=False)
                 xd.fit(train_set)
+                # shouldn't xd be applied to the test set???
                 trainx = xd.apply(train_set)[eid]
 
                 RMSE[eid][i,j] = np.sqrt(((trainx.get_data().mean(0)-test_set.get_data().mean(0))**2).mean())
