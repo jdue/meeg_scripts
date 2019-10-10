@@ -9,6 +9,8 @@ from functools import partial
 from glob import glob
 import matplotlib.pyplot as plt
 import mne
+from mne.simulation import simulate_evoked, simulate_sparse_stc
+
 from mne.io.constants import FIFF
 from numbers import Integral
 import numpy as np
@@ -50,7 +52,8 @@ def prepare_raw(sd, config, i=None):
     if i is None:
         i = 0
         
-    run = getf(getd(sd, 'runs'), 'meeg_sss_raw.fif')[i]
+    run = getf(getd(sd, 'runs'), config['filename'])[i]
+    del config['filename'] # not an input to preprocess_raw
     print('Preprocessing run {:d}'.format(i+1))
     raw = preprocess_raw(run, **config)
         
@@ -61,21 +64,25 @@ def prepare_epochs(sd, config):
     """
     #config['PREPROC_EPOCHS']
     
-    raw = getf(getd(sd, 'runs'), '*fmeeg_sss_raw.fif')
-    epochs = list()
-    for r in raw:
-        epochs.append(preprocess_epochs(r, **config))
+    raw = getf(getd(sd, 'runs'), '{}*_raw.fif'.format(config['prefix']))
+    del config['prefix']
+    
+    print('Preparing epochs from raw')
+    epochs = [preprocess_epochs(r, **config) for r in raw]
+    
     return epochs
     
 
-def prepare_concatenated_epochs(sd):
+def prepare_concatenated_epochs(sd, config):
     """Concatenate epoched data across runs.
     """
     d = getd(sd)
-    epochs = getf(d['runs'], 'pfmeeg*-epo.fif')
-    epoch = concat_epochs(epochs, d['run_concat'])
+    epochs = getf(d['runs'], '{}*-epo.fif'.format(config['prefix']))
     
-    return epoch
+    print('Concatenating epochs')
+    epochs = concat_epochs(epochs, d['run_concat'])
+    
+    return epochs
 
 def prepare_emptyroom_cov(sd, config):
     """Prepare (noise) covariance estimates from empty room measurements.
@@ -84,9 +91,10 @@ def prepare_emptyroom_cov(sd, config):
     d = getd(sd)
     emptyroom = config['PATH']['emptyroom']
     #emptyroom = [op.join(emptyroom, i) for i in ['090421', '090707', '090430']]
-    emptyroom = glob(op.join(emptyroom, 6*'[0-9]'+'.fif')) # ugly, I know
-    
-    raw = getf(d['runs'][0], '*fmeeg_sss_raw.fif')
+    #emptyroom = glob(op.join(emptyroom, 6*'[0-9]'+'.fif')) # ugly, I know
+    emptyroom = glob(op.join(emptyroom, 6*'[0-9]')) # ugly, I know
+    emptyroom = getf(emptyroom, 6*'[0-9]'+'.fif')
+    raw = getf(d['runs'][0], '*fmeeg_sss_raw.fif')[0]
     
     
     #raw_name = op.splitext(op.basename(raw.filenames[0]))[0]
@@ -104,7 +112,9 @@ def prepare_emptyroom_cov(sd, config):
 def preproc_autoreject(sd, config):
     """
     """
-    epochs = getf(getd(sd, 'run_concat'), 'pf*-epo.fif')
+    epochs = getf(getd(sd, 'run_concat'), '{}*-epo.fif'.format(config['prefix']))[0]
+    del config['prefix']
+    
     ar = preprocess_autoreject(epochs, **config)
     
     return ar
@@ -112,13 +122,10 @@ def preproc_autoreject(sd, config):
 def prepare_epochs_cov(sd, config):
     
     d = getd(sd)
-    epochs = getf(d['run_concat'], 'pf*-epo.fif')
-    if not isinstance(epochs, list):
-        epochs = [epochs]
+    epochs = getf(d['run_concat'], '{}*-epo.fif'.format(config['prefix']))
     
-    cov = list()
-    for epo in epochs:
-        cov.append(cov_epochs(epo, config['cov_type'], d['cov']))
+    print('Preparing {} covariance matrix'.format(config['cov_type']))
+    cov = [cov_epochs(e, config['cov_type'], d['cov']) for e in epochs]
     
     return cov
 
@@ -126,14 +133,13 @@ def preproc_xdawn(sd, config):
     """Preprocess epochs using XDAWN.
     """
     d = getd(sd)
-    epochs = getf(d['run_concat'], 'apf*-epo.fif')
-    signal_cov = getf(d['cov'], '*signal-cov.fif')
+    epochs = getf(d['run_concat'], '{}*-epo.fif'.format(config['prefix']))[0]
+    signal_cov = getf(d['cov'], '{}*signal-cov.fif'.format(config['prefix']))[0]
+    del config['prefix']
     
-    xe = list()
-    for epo, sc in zip(epochs, signal_cov):
-        xe.append(preprocess_xdawn(epo, sc, **config))
+    epochs = preprocess_xdawn(epochs, signal_cov, **config)
     
-    return xe
+    return epochs
 
 # LOW LEVEL FUNCTIONS
 # =============================================================================
@@ -377,9 +383,11 @@ def preprocess_raw(raw, channels=None, filt=None, phys='ica-reg'):
     
     if 'eeg' in chs:
         print("Rereferencing EEG data to average reference")
+        print("(not applying)")
         #raw = mne.add_reference_channels(raw, "REF")
-        raw.set_eeg_reference(projection=False)
-
+        #raw.set_eeg_reference(projection=False)
+        raw.set_eeg_reference(projection=True)#.apply_proj()
+        
     # Physiological noise correction
     # =========================================================================
     if (phys is not None) and (not any(np.concatenate((eog, ecg)))):
@@ -568,7 +576,6 @@ def emptyroom_cov(raw, filt, outdir):
     figdir = op.join(outdir, 'figures')
     if not op.exists(figdir):
         os.mkdir(figdir)
-        
     if isinstance(raw, str):
         raw = mne.io.read_raw_fif(raw, preload=True)
     else:
@@ -585,26 +592,18 @@ def emptyroom_cov(raw, filt, outdir):
     if filt['fmax'] is not None:
         print("Lowpass filtering at {} Hz".format(filt['fmax']))
         raw.filter(l_freq=None, h_freq=filt['fmax'], fir_design='firwin')
+
+    print("Computing covariance matrix")
+    noise_cov = mne.compute_raw_covariance(raw, method="shrunk")
+    noise_cov_name = op.join(outdir, 'emptyroom_noise-cov.fif')
+    noise_cov.save(noise_cov_name)
     
-    chs = compute_misc.pick_func_channels(raw.info)
-    cov_names = list()
-    for ch, picks in chs.items():
-        print("Computing covariance matrix : {}".format(ch.upper()))
-        noise_cov = mne.compute_raw_covariance(raw, method="shrunk",
-                                               picks=picks)
-        noise_cov_name = op.join(outdir,
-                                 'emptyroom_{}_noise-cov.fif'.format(ch))
-        noise_cov.save(noise_cov_name)
-        cov_names.append(noise_cov_name)
-        
-        fig_cov, fig_eig = noise_cov.plot(raw.info, show=False)
-        fig_cov.savefig(op.join(figdir,
-                                "emptyroom_{}_noise-cov.png".format(ch)))
-        fig_eig.savefig(op.join(figdir,
-                                "emptyroom_{}_noise-eig.png".format(ch)))
-        plt.close('all')
+    fig_cov, fig_eig = noise_cov.plot(raw.info, show=False)
+    fig_cov.savefig(op.join(figdir, "emptyroom_noise-cov.pdf"))
+    fig_eig.savefig(op.join(figdir, "emptyroom_noise-eig.pdf"))
+    plt.close('all')
     
-    return cov_names
+    return noise_cov_name
 
 
 
@@ -647,7 +646,6 @@ def preprocess_epochs(fname_raw, event_codes, stim_chan=None, stim_delay=0, tmin
     print('Stimulus delay is {:0.0f} ms'.format(stim_delay*1e3))
     print('Epoching from {:0.0f} ms to {:0.0f} ms'.format(tmin*1e3,tmax*1e3))
     print('Baseline correction using {:0.0f} ms to {:0.0f} ms'.format(baseline[0]*1e3, baseline[1]*1e3))
-    #noise_cov = mne.compute_raw_covariance(empty_room, tmin=0, tmax=None)
     
     print("Epoching...")
     
@@ -746,7 +744,7 @@ def concat_epochs(fname_epochs, outdir=None):
     
     return epochs_name
 
-def preprocess_autoreject(fname_epochs, stim_delay=0, kappa=None):
+def preprocess_autoreject(fname_epochs, stim_delay=0, kappa=None, n_jobs=1):
     """
     
     epochs : dict
@@ -757,28 +755,104 @@ def preprocess_autoreject(fname_epochs, stim_delay=0, kappa=None):
     
     """
     
-    # We need to optimize two parameters by cross validation
-    #   rho   : the maxmimum number of "bad" channels to interpolate)
-    #   kappa : fraction of channels which has to be deemed bad for an epoch to be
-    #           dropped
     assert isinstance(fname_epochs, str) and op.isfile(fname_epochs)
     basename, outdir, figdir = get_output_names(fname_epochs)
     basename = 'a'+basename
     
-    epoch = mne.read_epochs(fname_epochs)
+    epochs = mne.read_epochs(fname_epochs)
+    ntrials = len(epochs)    
+    nchan = len(mne.pick_types(epochs.info, meg=True, eeg=True, ref_meg=False))
     
-    chs = compute_misc.pick_func_channels(epoch.info)
-    
-    print("Running AutoReject")
-    print("")
-    
+    # Parameter space to use for cross validation
+    # rho   : the maxmimum number of "bad" channels to interpolate
+    # kappa : fraction of channels which has to be deemed bad for an epoch to
+    #         be dropped.
     if kappa is None:
         kappa = np.linspace(0, 1.0, 11)
+    rho = np.round(np.arange(nchan/20, nchan/4, nchan/20)).astype(np.int)
     
-    thresh_func = partial(compute_thresholds, method="random_search")
+    # Args for threshold detection function
+    thresh_func = partial(compute_thresholds, method="random_search",
+                          n_jobs=n_jobs)
     
-    ntrials = len(epoch)
     
+    print("Running AutoReject")
+    print("------------------")
+    print('# jobs   : {}'.format(n_jobs))
+    print("# trials : {}".format(ntrials))
+    print("kappa    : {}".format(kappa))
+    print("rho      : {}\n".format(rho))
+    
+    # Fit (local) AutoReject using CV
+    ar = LocalAutoRejectCV(rho, kappa, thresh_func=thresh_func)
+
+    print('Fitting parameters')
+    ar = ar.fit(epochs)
+    print('Transforming epochs')
+    clean_epochs = ar.transform(epochs)
+    
+    # Save
+    epochs_name =  op.join(outdir, "{}-epo.fif".format(basename))
+    clean_epochs.save(epochs_name)
+
+    
+    # Evoked response after AR
+    clean_evoked = list()
+    for condition in clean_epochs.event_id.keys():
+        evo = clean_epochs[condition].average()
+        evo.shift_time(-stim_delay)
+        clean_evoked.append(evo)
+
+    evo_name = op.join(outdir, "{}-ave.fif".format(basename))
+    mne.evoked.write_evokeds(evo_name, clean_evoked)
+    
+    # Visualize results of autoreject
+    
+    # Bad segments
+    fig_bad, fig_frac = visualize_misc.viz_ar_bads(ar)
+    fig_name = op.join(figdir, "Epochs_bad_segments.pdf")
+    fig_bad.savefig(fig_name, bbox_inches="tight")
+    fig_name = op.join(figdir, "Epochs_bad_fractions.pdf")
+    fig_frac.savefig(fig_name, bbox_inches="tight")
+    
+    # Check for bad channels
+    bad_cutoff = 0.5
+    bad_frac = ar.bad_segments.mean(0)
+    possible_bads = [epochs.ch_names[bad] for bad in np.where(bad_frac>bad_cutoff)[0]]
+    
+    for cevo in clean_evoked:                
+        condition = cevo.comment
+        
+        evo_name = op.join(figdir, "{}_{}".format(basename, condition))
+        
+        fig = cevo.plot(spatial_colors=True, exclude='bads', show=False)
+        fig.axes[0].set_title("Evoked Response '{}'".format(condition))
+        fig.savefig(evo_name+".pdf")
+    
+        if any(possible_bads):
+            # Evoked response before AR
+            evo = epochs[condition].average()
+            evo.shift_time(-stim_delay)
+            evo.plot(spatial_colors=True, exclude='bads', show=False)
+            
+            # Plot the bad channels before and after AR
+            tb = evo.copy()
+            ta = cevo.copy()
+            tb.info["bads"] = possible_bads
+            ta.info["bads"] = possible_bads
+            
+            fig = tb.plot(spatial_colors=False, exclude=[], show=False)
+            fig.axes[0].set_title("Evoked Response '{}' before AutoReject".format(condition))
+            fig.savefig(evo_name+"-bads-before.pdf")
+            fig = ta.plot(spatial_colors=False, exclude=[], show=False)
+            fig.axes[0].set_title("Evoked Reponse '{}' after AutoReject".format(condition))
+            fig.savefig(evo_name+"-bads-after.pdf")
+    
+        plt.close('all')
+        
+    return epochs_name
+    
+    """
     epochs = list()
     for ch,picks in chs.items():
         nchan = len(picks)
@@ -795,7 +869,9 @@ def preprocess_autoreject(fname_epochs, stim_delay=0, kappa=None):
         
         # Fit (local) AutoReject using CV
         ar = LocalAutoRejectCV(rho, kappa, thresh_func=thresh_func)
-        cepo = ar.fit_transform(epo)
+        #cepo = ar.fit_transform(epo)
+        ar = ar.fit(epo)
+        cepo = ar.transform(epo)
         
         # Save
         epo_name = "{}_{}-epo.fif".format(basename, ch)
@@ -859,7 +935,7 @@ def preprocess_autoreject(fname_epochs, stim_delay=0, kappa=None):
         
         plt.close('all')
     
-    return epochs
+    return epochs"""
 
 def cov_epochs(epochs, cov_type='noise', outdir=None):
     """
@@ -885,7 +961,8 @@ def cov_epochs(epochs, cov_type='noise', outdir=None):
         win = (None, None)
     else:
         raise TypeError("cov_type must be 'noise' or 'signal'")
-
+    
+    print('Using time window {} to {}'.format(*win))
     cov = mne.compute_covariance(epochs, tmin=win[0], tmax=win[1],
                                  method="shrunk")
     cov_name = op.join(outdir, "{}_{}-cov.fif".format(basename, cov_type))
@@ -900,6 +977,7 @@ def cov_epochs(epochs, cov_type='noise', outdir=None):
     
 def preprocess_xdawn(epochs, signal_cov, stim_delay=0):
     """
+    apply xdawn to each channel type separately...
     
     """
     
@@ -910,51 +988,67 @@ def preprocess_xdawn(epochs, signal_cov, stim_delay=0):
     epochs = mne.read_epochs(epochs)
     signal_cov = mne.read_cov(signal_cov)
     
+    # Pick only functional types so as to match signal covariance data
+    epochs.pick_types(meg=True, eeg=True, ref_meg=False)
+    
     #scale = dict(eeg=1e6, grad=1e13, mag=1e15)
     
-    print('Denoising using xDAWN')
-    n_components, fig = xdawn_cv(epochs, signal_cov)
-    fig.set_size_inches(10,5)
-    fig.savefig(op.join(figdir, '{}_xdawn_cv.pdf').format(basename))
     
-    print('Applying xDAWN')
-    data = np.zeros_like(epochs.get_data())
-    for condition, eidv in epochs.event_id.items():
-        # Fit each condition separately
-        print(condition)
-        xd = mne.preprocessing.Xdawn(n_components[condition], signal_cov,
-                                     correct_overlap=False)
-        xd.fit(epochs[condition])
-        x = xd.apply(epochs[condition])[condition].get_data()
-        data[epochs.events[:,2]==eidv] = x
+    chs = compute_misc.pick_func_channels(epochs.info)
+    for ch, picks in chs.items():
+        print('Processing', ch.upper())
+        epo = epochs.copy()
+        ch_names = [epochs.ch_names[i] for i in picks]
+        epo.pick_channels(ch_names)
+        signal_cov_data = signal_cov.data[picks][:,picks]
         
-        # Component time series
-        fig = plt.figure()
-        ax = fig.add_subplot(111)
-        ax.plot((epochs.times-stim_delay)*1e3,
-                xd.transform(epochs[condition].get_data()).mean(0).T)#*scale[ch])
-        ax.set_xlabel('Time (ms)')
-        plt.legend([str(i) for i in range(xd.n_components)])
-        ax.set_title("xDAWN time courses '{}'".format(condition))
-        fig.savefig(op.join(figdir, '{}_xdawn_timecourses_{}.pdf'.format(basename, condition)))
+        print('Denoising using xDAWN')
+        print('Estimating parameters using cross validation')
+        n_components, fig = xdawn_cv(epo, signal_cov_data)
+        fig.set_size_inches(10,5)
+        fig.savefig(op.join(figdir, '{}_{}_xdawn_cv.pdf').format(basename, ch))
     
-        # Component patterns
-        nrows = 2
-        ncols = 4
-        fig, axes = plt.subplots(2, 4)
-        i = 0
-        for row in range(nrows):
-            for col in range(ncols):
-                mne.viz.plot_topomap(xd.patterns_[condition].T[i], epochs.info,
-                                     axes=axes[row,col], show=False)
-                i += 1
-        fig.suptitle("xDAWN patterns '{}'".format(condition))
-        fig.tight_layout()
-        fig.savefig(op.join(figdir, '{}_xdawn_patterns_{}.pdf'.format(basename, condition)))            
-    
-    # Update epochs
-    epochs._data = data.copy()
-    
+        print('Applying xDAWN')
+        data = np.zeros_like(epo.get_data())
+        for condition, eidv in epo.event_id.items():
+            # Fit each condition separately
+            print(condition)
+            xd = mne.preprocessing.Xdawn(n_components[condition],
+                                         signal_cov_data,
+                                         correct_overlap=False)
+            xd.fit(epo[condition])
+            x = xd.apply(epo[condition])[condition].get_data()
+            data[epo.events[:,2]==eidv] = x
+            
+            # Component time series
+            fig = plt.figure()
+            ax = fig.add_subplot(111)
+            ax.plot((epo.times-stim_delay)*1e3,
+                    xd.transform(epo[condition].get_data()).mean(0).T)#*scale[ch])
+            ax.set_xlabel('Time (ms)')
+            plt.legend([str(i) for i in range(xd.n_components)])
+            ax.set_title("xDAWN time courses '{}'".format(condition))
+            fig.savefig(op.join(figdir, '{}_{}_xdawn_timecourses_{}.pdf'.format(basename, ch, condition)))
+            plt.close('all')
+            
+            # Component patterns
+            nrows = 2
+            ncols = 4
+            fig, axes = plt.subplots(2, 4)
+            i = 0
+            for row in range(nrows):
+                for col in range(ncols):
+                    mne.viz.plot_topomap(xd.patterns_[condition].T[i], epo.info,
+                                         axes=axes[row,col], show=False)
+                    i += 1
+            fig.suptitle("xDAWN patterns '{}' [{}]".format(condition, ch))
+            fig.tight_layout()
+            fig.savefig(op.join(figdir, '{}_{}_xdawn_patterns_{}.pdf'.format(basename, ch, condition)))
+            plt.close('all')
+            
+        # Update original epochs object
+        epochs._data[:, picks, :] = data.copy()
+        
     # Save epochs
     epo_name = "{}-epo.fif".format(basename)
     epo_name = op.join(outdir, epo_name)
@@ -979,20 +1073,20 @@ def preprocess_xdawn(epochs, signal_cov, stim_delay=0):
         evo_name = op.join(figdir, evo_name)
         
         fig = evo.plot(spatial_colors=True, exclude='bads', show=False)
-        fig.axes[0].set_title("Evoked '{}'".format(condition))
+        #fig.axes[0].set_title("Evoked '{}'".format(condition))
         fig.savefig(evo_name+".pdf")
             
     plt.close('all')
         
     return epo_name
 
-def xdawn_cv(epochs, signalcov, component_grid=None, nfolds=5, cv_curve=True):
+def xdawn_cv(epochs, signal_cov, component_grid=None, nfolds=5, cv_curve=True):
     """Use cross validation to find the optimal number of xDAWN components to
     project the epochs onto.
     
     epochs : MNE.Epochs object
     
-    signalcov : 
+    signal_cov : 
         
     component_grid : 
     
@@ -1021,11 +1115,12 @@ def xdawn_cv(epochs, signalcov, component_grid=None, nfolds=5, cv_curve=True):
         RMSE[eid] = np.zeros((nfolds,len(component_grid)))
         
         for i, (train, test) in enumerate(kf.split(range(len(epo)))):
+            print('Fold', i+1, 'of', nfolds)
             for j, n_components in enumerate(component_grid):
                 train_set = epo.copy().drop(test)
                 test_set = epo.copy().drop(train)
                 
-                xd = mne.preprocessing.Xdawn(n_components, signalcov, correct_overlap=False)
+                xd = mne.preprocessing.Xdawn(n_components, signal_cov, correct_overlap=False)
                 xd.fit(train_set)
                 trainx = xd.apply(train_set)[eid]
 
@@ -1069,17 +1164,19 @@ def prepare_contrasts(sd, config):
     if isinstance(config['contrasts'], dict):
         config['contrasts'] = [config['contrasts']]
         
-    d = getd(sd, 'run_concat')
-    evoked = getf(d, 'apf*-ave.fif')
+    d = getd(sd)
+    evoked = getf(d['run_concat'], 'apf*-ave.fif')
     
     print('Preparing {} contrast(s)'.format(len(config['contrasts'])))
     cevo = []
     for c in config['contrasts']:
+        c['outdir'] = d['contrasts']
         for evo in evoked:
             cevo.append(make_contrast(evo, **c))
         
     
-def make_contrast(evoked, c1=None, c2=None, c1_name=None, c2_name=None, outdir=None):
+def make_contrast(evoked, c1=None, c2=None, c1_name=None, c2_name=None,
+                  outdir=None):
     """
     does the contrast c1 > c2 and saves the result.
     
@@ -1169,38 +1266,6 @@ def make_contrast(evoked, c1=None, c2=None, c1_name=None, c2_name=None, outdir=N
     return contrast
     
 
-def setup_runs(subject_dir):
-    """
-    
-    """
-    meg_dir = op.join(subject_dir, 'MEEG')
-    
-    # Move runs to separate folders
-    dsts = list()
-    for r in glob(op.join(meg_dir, 'run_*_sss.fif')):
-        basename = op.basename(r)
-        basesplit, _ = op.splitext(basename)
-        
-        rundir = op.join(meg_dir, basesplit)    # base directory for this run
-        figdir = op.join(rundir, 'figures') # keep figures here
-        
-        if not op.exists(rundir):
-            os.makedirs(rundir, exist_ok=True)
-        if not op.exists(figdir):
-            os.makedirs(figdir, exist_ok=True)
-        
-        dst = op.join(rundir, basename)
-        shutil.move(r, dst)
-        dsts.append(dst)
-    
-    # If they have already been moved, fetch them
-    if not any(dsts):
-        for r in glob(op.join(meg_dir, 'run_*_sss')):
-            assert op.isdir(r)
-            r = glob(op.join(r, 'run_*_sss.fif'))[0]
-            dsts.append(r)
-            
-    return dsts
 
 def get_output_names(fname_raw):
     
@@ -1213,68 +1278,9 @@ def get_output_names(fname_raw):
     
     return basename, outdir, figdir
 
-#%%    
-"""  
-def estimate_
-        if estimate_noise_cov:
-            print("Estimating noise covariance in {}".format(baseline))
-            noise_cov[ch] = mne.compute_covariance(epochs[ch],tmin=baseline[0],
-                                           tmax=baseline[1], method="shrunk")
-            
-            noise_cov[ch].save(op.join(savedir, "{}_{}_noise-cov.fif".format(raw_base, ch)))
-        
-            # Save figures
-            figs = noise_cov[ch].plot(epochs[ch].info, show=False)
-            for fig,which in zip(figs, ["mat", "eig"]):
-                fig.set_size_inches(10,10)
-                fig.savefig(op.join(evo_fig, "{}_{}_noise-cov_{}.pdf".format(raw_base, ch, which)))
-            
-        if estimate_signal_cov or xdawn:
-        # Use entire epoch (i.e., all signal + noise) or 0 to end?
-            print("Estimating signal covariance in {}".format((tmin, tmax)))
-            signal_cov[ch] = mne.compute_covariance(epochs[ch],tmin=None,
-                                           tmax=None, method="shrunk")
-            
-            signal_cov[ch].save(op.join(savedir, "{}_{}_signal-cov.fif".format(raw_base, ch)))
-            
-            # Save figures
-            figs = signal_cov[ch].plot(epochs[ch].info, show=False)
-            for fig,which in zip(figs, ["mat", "eig"]):
-                fig.set_size_inches(10,10)
-                fig.savefig(op.join(evo_fig, "{}_{}_signal-cov_{}.pdf".format(raw_base, ch, which)))
-            
-    plt.close("all")     
+def initialize_structure(sd):
     
-    print("Done")
-""" 
-
-def getd(sd, k=None):
-    """Get the different directories...
-    if k is specified return only that directory in which case the result is a
-    string - otherwise a dict
-    """
-    
-    d = dict()
-    d['meeg'] = op.join(sd, 'MEEG')
-    d['cov'] = op.join(d['meeg'], 'cov')
-    
-    d['runs'] = sorted(glob(op.join(d['meeg'], 'run*')),key=str.lower)
-    d['run_concat'] = op.join(d['meeg'], 'run_concat')
-    
-    d['fwd'] = op.join(d['meeg'], 'forward')
-    
-    d['fwds'] = sorted(glob(op.join(d['fwd'], '*')), key=str.lower)
-    
-    d['inv'] = op.join(d['meeg'], 'inverse')
-    
-    #d['src'] = op.join(d['fwd'], 'src')
-    #d['gain'] = op.join(d['fwd'], 'gain')
-    #d['headmodel'] = op.join(d['fwd'], 'headmodel')
-    #d['coreg'] = op.join(d['fwd'], 'coreg')
-    
-    d['precomp'] = op.join(d['meeg'], 'precomputed')
-    
-    d['smri'] = op.join(sd, 'sMRI')
+    d = getd(sd)
     
     # Check for existance
     for _,v in d.items():
@@ -1285,9 +1291,28 @@ def getd(sd, k=None):
         else:
             if not op.exists(v):
                 os.makedirs(v)
-        
+
+def getd(sd, k=None):
+    """Get the different directories...
+    if k is specified return only that directory in which case the result is a
+    string - otherwise a dict
+    """
+    
+    d = dict()
+    d['meeg'] = op.join(sd, 'MEEG')
+    d['cov'] = op.join(d['meeg'], 'cov')  
+    d['runs'] = sorted(glob(op.join(d['meeg'], 'run_[0-9]*')),key=str.lower)
+    d['run_concat'] = op.join(d['meeg'], 'run_concat')  
+    d['fwd'] = op.join(d['meeg'], 'forward')  
+    d['fwds'] = sorted(glob(op.join(d['fwd'], '*')), key=str.lower)  
+    d['inv'] = op.join(d['meeg'], 'inverse')
+    d['contrasts'] = op.join(d['meeg'], 'contrasts') 
+    d['precomp'] = op.join(d['meeg'], 'precomputed')  
+    d['smri'] = op.join(sd, 'sMRI')
+          
     if k is not None:
         d = d[k]
+    
     return d
 
 def getf(path, pattern, recursive=False):
@@ -1311,12 +1336,11 @@ def getf(path, pattern, recursive=False):
             except IndexError:
                 pass
             #f = [try: glob(op.join(p,'**', pattern), recursive=True)[0] for p in path]
+            
+    if not any(f):
+        raise IOError('No files matching {:s} in {:s}'.format(pattern, path))
     
-    # Unpack if only one element    
-    if len(f) == 1:
-        return f[0]
-    else:
-        return sorted(f, key=str.lower)
+    return sorted(f, key=str.lower)
 
 def get_surfs(sd, config):
     """
@@ -1419,7 +1443,7 @@ def coreg(sd, config):
     df = getfwdd(sd, config)
     
     # Get files
-    raw = getf(d['runs'][0], '*fmeeg_sss_raw.fif')
+    raw = getf(d['runs'][0], '*fmeeg_sss_raw.fif')[0]
     info = mne.io.read_info(raw)
     mrifids = op.join(d['smri'], 'mri_fids.txt')
     skin = get_surfs(sd, config)['skin']
@@ -1590,10 +1614,10 @@ def prepare_forward(sd, config):
     d = getd(sd, 'runs')
     df = getfwdd(sd, config)
     
-    raw = getf(d[0], '*fmeeg_sss_raw.fif')  
-    src = getf(df['src'], '*-src.fif')
-    bem = getf(df['hm'], '*bem-sol.fif')
-    trans = getf(df['coreg'], '*-trans.fif')
+    raw = getf(d[0], '*fmeeg_sss_raw.fif')[0]
+    src = getf(df['src'], '*-src.fif')[0]
+    bem = getf(df['hm'], '*bem-sol.fif')[0]
+    trans = getf(df['coreg'], '*-trans.fif')[0]
     
     fwd = prepare_forward_mne(raw, src, bem, trans, df['gain'])
     
@@ -1723,7 +1747,10 @@ def fit_dipole(evoked, noise_cov, bem, trans, times):
     return 
 
 def compute_whitener(inv, return_inverse=False):
-    
+    """
+    Use mne.cov.compute_whitener to compute W which whitens AND transforms the
+    data back to the original space 
+    """
     # Whitener
     eig = inv['noise_cov']['eig']
     nonzero = eig > 0
@@ -1743,7 +1770,7 @@ def compute_whitener(inv, return_inverse=False):
     else:
         return W
 
-def compute_MNE_cost(evoked, inv, lambda2, twin):
+def compute_MNE_cost(evoked, inv, lambda2, twin, return_parts=False):
     """Compute the cost function of a minimum norm estimate. The cost function
     is given by
     
@@ -1767,15 +1794,6 @@ def compute_MNE_cost(evoked, inv, lambda2, twin):
     inv : *Prepared* inverse operator
     
     """
-    
-    """
-    evoked = mne.read_evokeds('/mrhome/jesperdn/wakeman_henson_meeg_test/Sub02/MEEG/run_concat/Faces_vs_Scrambled_Faces/apfmeeg_sss_raw_eeg-ave.fif')
-    noise_cov = mne.read_cov('/mrhome/jesperdn/wakeman_henson_meeg_test/Sub02/MEEG/cov/pfmeeg_sss_raw_noise-cov.fif')
-    fwd = mne.read_forward_solution('/mrhome/jesperdn/wakeman_henson_meeg_test/Sub02/MEEG/forward/BEM_005_0.0319/gain/forward-fwd.fif')
-    evo=evoked[0]
-    twin=[0.15,0.19]
-    method='MNE'
-    """
     if twin is not None:
         assert len(twin) is 2
         tidx = evoked.time_as_index(twin)
@@ -1798,12 +1816,11 @@ def compute_MNE_cost(evoked, inv, lambda2, twin):
     R = inv['source_cov']['data'][:,None]
     iR = 1/R
     
-    
     # Whitening operator
     W, iW = compute_whitener(inv, return_inverse=True)
     
     # Inverse operator
-    M = np.sqrt(R) * V * gamma_reg[None,:] @ U.T    
+    M = np.sqrt(R) * V * gamma_reg[None,:] @ U.T
     
     
     # Current estimate (the inverse solution)
@@ -1821,7 +1838,7 @@ def compute_MNE_cost(evoked, inv, lambda2, twin):
     
     # Get the solution ('sol') from mne.minimum_norm.inverse line 795. Don't
     # apply noise_norm to sol. Then undo source covariance (depth) weighting.
-    # MNE also weights by the effective number of averages ('nave') such that
+    # MNE also weighs by the effective number of averages ('nave') such that
     # R = R / nave that thus iR = 1/R * nave, however, since we are using a
     # *prepared* inverse operator, R has already been scaled by nave so no need
     # to undo this manually.
@@ -1850,18 +1867,26 @@ def compute_MNE_cost(evoked, inv, lambda2, twin):
     # The prediction term
     E = X - Xe    # Error
     WE = W @ E    # White error
+    #WE = np.sum(WE**2)
+    #JP = lambda2 * np.sum(J**2 * iR) # current norm penalty
+    
+    WE = np.sum(WE**2)
+    JP = lambda2 * np.sum(J**2 * iR)
     
     # Cost in 'twin' or over all time points
-    cost = np.sum(WE**2) + lambda2 * np.sum(J**2 * iR)
+    cost = WE + JP
     
-#    plt.figure()
-#    plt.subplot(3,1,1)
-#    plt.plot(X.T*1e6)
-#    plt.subplot(3,1,2)
-#    plt.plot(Xe.T*1e6)
-#    plt.subplot(3,1,3)
-#    plt.plot(E.T*1e6)
-    
+    """
+    plt.figure()
+    plt.subplot(3,1,1)
+    plt.plot(X.T*1e6)
+    plt.subplot(3,1,2)
+    plt.plot(Xe.T*1e6)
+    plt.subplot(3,1,3)
+    plt.plot(E.T*1e6)
+    """
+    if return_parts:
+        return cost, WE, JP
     return cost
 
 
@@ -1876,7 +1901,10 @@ def get_noise_covs(covd, mods):
     else:
         noise_cov_empty = [n for n in noise_cov_all if 'emptyroom' in n]
         noise_cov_spe = [n for n in noise_cov_all if not 'emptyroom' in n and any([m for m in mods if m in op.basename(n)])]
-        noise_cov_gen = [n for n in noise_cov_all if not any([m for m in mods if m in op.basename(n)])]
+        #noise_cov_gen = [n for n in noise_cov_all if not any([m for m in mods if m in op.basename(n)])]
+        noise_cov_gen = getf(covd, '*raw_noise-cov.fif', recursive=False)
+        if any(noise_cov_gen) and isinstance(noise_cov_gen, str):
+            noise_cov_gen = [noise_cov_gen]
         # We can only have one 'general' noise covariance matrix file
         assert len(noise_cov_gen) in [0, 1], 'Number of general noise covs was {}'.format(len(noise_cov_gen))
         
@@ -1911,33 +1939,41 @@ def prepare_inverse(sd, config, i=None):
         i = 0
         
     d = getd(sd)
-    cd = d['run_concat']
-    if config['contrast'] is not None:
-        cd = op.join(cd, config['contrast'])
-    
-    evoked = getf(cd, 'apf*-ave.fif')
-    if not any(evoked):
-        raise IOError('No evoked data found.')
-    mods = ['_'+op.basename(e).split('-')[0].split('_')[-1]+'_' for e in evoked]
-    
-    noise_cov = get_noise_covs(d['cov'], mods)
-    if not any(noise_cov):
-        raise IOError('No covariance data found.')
+    if not isinstance(config['contrast'], list):
+        config['contrast'] = [config['contrast']]
         
-    print('Preparing inverse solution')
-    fwdd = d['fwds'][i]
-    fwd = getf(op.join(fwdd, 'gain'), '*-fwd.fif')
-    fwdb = op.basename(fwdd)
-    outdir = op.join(d['inv'], config['contrast'], config['method'], fwdb)
-    
-    if not any(fwd):
-        raise IOError('Gain matrix not found.')
-    
-    print(op.basename(fwdb))
-    for evo, cov in zip(evoked, noise_cov):
-        cost = do_inverse(evo, cov, fwd, twin=config['twin'],
-                          method=config['method'],
-                          fwd_normal=config['fwd_normal'], outdir=outdir)
+    for contrast in config['contrast']:    
+        print('Contrast : {}'.format(contrast))
+        
+        assert contrast is not None
+        cd = op.join(d['contrasts'], contrast)
+        if 'simulation' in contrast.lower():
+            evoked = getf(cd, 'pf*-ave.fif') # created from raw
+        else:
+            evoked = getf(cd, '{}*-ave.fif'.format(config['prefix']))
+                
+        if not any(evoked):
+            raise IOError('No evoked data found.')
+        #mods = ['_'+op.basename(e).split('-')[0].split('_')[-1]+'_' for e in evoked]
+        #noise_cov = get_noise_covs(d['cov'], mods)
+        noise_cov = getf(d['cov'], '{}*noise-cov.fif'.format(config['prefix']))
+        if not any(noise_cov):
+            raise IOError('No covariance data found.')
+            
+        print('Preparing inverse solution')
+        fwdd = d['fwds'][i]
+        fwd = getf(op.join(fwdd, 'gain'), '*-fwd.fif')[0]
+        fwdb = op.basename(fwdd)
+        outdir = op.join(d['inv'], contrast, config['method'], fwdb)
+        
+        if not any(fwd):
+            raise IOError('Gain matrix not found.')
+        
+        print(op.basename(fwdb))
+        for evo, cov in zip(evoked, noise_cov):
+            cost = do_inverse(evo, cov, fwd, twin=config['twin'],
+                              method=config['method'],
+                              fwd_normal=config['fwd_normal'], outdir=outdir)
             
     print('Done')
     
@@ -1950,6 +1986,9 @@ def plot_inverse(sd, config, i=None):
     # times
     if i is None:
         i = 0
+    
+    if not isinstance(config['contrast'], list):
+        config['contrast'] = [config['contrast']]
         
     d = getd(sd)
     
@@ -1962,14 +2001,19 @@ def plot_inverse(sd, config, i=None):
     src = getf(srcd, '[lr]*')
     
     # Source estimate
-    invd = op.join(d['inv'], config['contrast'], config['method'], fwdb)
-    stc = getf(invd, '*stc')
-    stc = [s.rstrip('-[lr]h.stc') for s in stc]
-    stc = list(set(stc))
-    
-    for s in stc:
-        plot_stc(s, src, config['twin'])
-            
+    for contrast in config['contrast']:
+        invd = op.join(d['inv'], contrast, config['method'], fwdb)
+        stc = getf(invd, '*stc')
+        stc = [s.rstrip('-[lr]h.stc') for s in stc]
+        stc = list(set(stc))
+        
+        for s in stc:
+            plot_stc(s, src, config['twin'])
+            if config['clean_stc_on_plot']:
+                print('Removing source estimates:')
+                for f in glob(s+'*'):
+                    print(f)
+                    os.remove(f)
 
 def do_inverse(evoked, noise_cov, fwd, twin, method='dSPM', signal_cov=None,
                fwd_normal=False,
@@ -2044,56 +2088,61 @@ def do_inverse(evoked, noise_cov, fwd, twin, method='dSPM', signal_cov=None,
         fig.savefig(op.join(figdir, '{}_whitened').format(basename))
         plt.close('all')
         
-        if method in ['MNE', 'dSPM', 'sLORETA']:
-            #
-            # Minimum norm estimate
-            #
-            
-            # Make an MEG inverse operator
-            print("Making inverse operator")
-            inv = mne.minimum_norm.make_inverse_operator(evo.info, fwd, noise_cov,
-                                                         loose=None, depth=None,
-                                                         fixed=fwd_normal)
-            
-            # Estimate SNR
-            print("Estimating SNR at {} ms".format(tms))
-            snr, snr_est = mne.minimum_norm.estimate_snr(evo, inv)
-            snr_estimate = snr[tslice].mean()
-            print('Estimated SNR at {} ms is {:.2f}'.format(tms, snr_estimate))
+        #evo.pick_types(meg=False, eeg=True)
         
-            # Apply the operator
-            lambda2 = 1/snr_estimate**2
+        evoc = evo.copy()
+        chs = compute_misc.pick_func_channels(evo.info)
+        for ch, picks in chs.items():
+            print('Inverting {} channels'.format(ch))
+            evo = evo.pick_channels([evo.ch_names[i] for i in picks])
             
-            print("Preparing inverse operator")
-            inv = mne.minimum_norm.prepare_inverse_operator(inv, evo.nave, lambda2, method)
+            if method in ['MNE', 'dSPM', 'sLORETA']:
+                #
+                # Minimum norm estimate
+                #
+                
+                # Make an MEG inverse operator
+                print("Making inverse operator")
+                inv = mne.minimum_norm.make_inverse_operator(evo.info, fwd, noise_cov,
+                                                             loose=None, depth=None,
+                                                             fixed=fwd_normal)
+                
+                # Estimate SNR
+                print("Estimating SNR at {} ms".format(tms))
+                snr, snr_est = mne.minimum_norm.estimate_snr(evo, inv)
+                snr_estimate = snr[tslice].mean()
+                print('Estimated SNR at {} ms is {:.2f}'.format(tms, snr_estimate))
             
-            print("Applying inverse operator")
-            stc = mne.minimum_norm.apply_inverse(evo, inv, lambda2, method, prepared=True)
+                # Apply the operator
+                lambda2 = 1/snr_estimate**2
+                
+                print("Preparing inverse operator")
+                inv = mne.minimum_norm.prepare_inverse_operator(inv, evo.nave, lambda2, method)
+                
+                print("Applying inverse operator")
+                stc = mne.minimum_norm.apply_inverse(evo, inv, lambda2, method, prepared=True)
+                
+                print('Computing cost function')
+                cost, we, jp = compute_MNE_cost(evo, inv, lambda2, twin, return_parts=True)
+                print('Cost : {}'.format(cost))
+                
+            elif method == 'LCMV':
+                stc = mne.beamformer.lcmv(evo, fwd, noise_cov, signal_cov, reg=0.05,
+                                          pick_ori=None)
             
-            print('Computing cost function')
-            cost = compute_MNE_cost(evo, inv, lambda2, twin)
-            print('Cost : {}'.format(cost))
+            if crop:
+                print('Cropping to {}'.format(twin))
+                stc.crop(*twin) # to save space
+                
+            print("Writing source estimate")
+            stc_name = op.join(outdir, basename+'_{}'.format(ch))
+            stc.save(stc_name)
+            stcs.append(stc_name)
             
-        elif method == 'LCMV':
-            #
-            # Beamformer
-            # 25151894.97133616
-            # 24317832.418909758
-            stc = mne.beamformer.lcmv(evo, fwd, noise_cov, signal_cov, reg=0.05,
-                                      pick_ori=None)
+            
+            np.savetxt(op.join(outdir, 'cost_'+basename+'_{}'.format(ch)+'.txt'), np.asarray([we, jp, cost]))
         
-        if crop:
-            print('Cropping to {}'.format(twin))
-            stc.crop(*twin) # to save space
-            
-        print("Writing source estimate")
-        stc_name = op.join(outdir, basename)
-        stc.save(stc_name)
-        stcs.append(stc_name)
-        
-        
-        np.savetxt(op.join(outdir, 'cost_'+basename+'.txt'), np.asarray([cost]))
-        
+            evo = evoc.copy()
         # if plot:
         #     ...
         
@@ -2105,53 +2154,147 @@ def do_inverse(evoked, noise_cov, fwd, twin, method='dSPM', signal_cov=None,
         
     return cost
     
-def simulate_data(raw, fwd):
-    """
-    """
-    raw = '/home/jesperdn/wakeman_henson_meeg_test/Sub02/MEEG/run_01/pfmeeg_sss_raw.fif'
-    evoked = '/home/jesperdn/wakeman_henson_meeg_test/Sub02/MEEG/run_concat/apfmeeg_sss_raw_eeg-ave.fif'
-    fwd = '/home/jesperdn/wakeman_henson_meeg_test/Sub02/MEEG/forward/BEM_007_0.0458/gain/forward-fwd.fif'
-    noise_cov = '/home/jesperdn/wakeman_henson_meeg_test/Sub02/MEEG/cov/pfmeeg_sss_raw_noise-cov.fif'
+def prepare_simulated(sd, config, i=None):
     
+    if i is None:
+        i = 0
+    
+    d = getd(sd)
+    raw = getf(d['runs'][0], '{}*_raw.fif'.format(config['prefix']))[0]
+    noise_cov = getf(d['cov'], '*_raw_noise-cov.fif')[0] # general noise cov
+    fwdd = d['fwds'][i]
+    fwdb = op.basename(fwdd)
+    fwd = getf(op.join(fwdd, 'gain'), '*-fwd.fif')[0]
+    outdir = op.join(d['contrasts'], 'Simulation_{}'.format(fwdb))
+    
+    print('Simulating evoked data using {:s}'.format(fwdb))
+    evoked, stc = simulate_evoked_data(raw, fwd, noise_cov, config['nave'],
+                                  outdir=outdir)
+    return evoked, stc
+
+def simulate_evoked_data(raw, fwd, noise_cov, nave=30, outdir=None):
+    """
+    
+    raw : instance of Raw
+        Instance of raw with information corresponding to that of the forward
+        solution. This is used as a template for the simulated data.
+    fwd : mne.forward.Forward
+        Instance of fwd used to simulate the measured data.
+    noise_cov : mne.cov.Covariance
+    
+    nave : int
+        Number of averages in evoked data. This determines the SNR as noise is
+        reduced by a factor of sqrt(nave).
+    
+    nave = (1 / 10 ** ((actual_snr - snr)) / 20) ** 2
+    
+    
+        
+    """
+    
+    # Output directories
+    if outdir is None:
+        outdir = op.dirname(raw)
+    if not op.exists(outdir):
+        os.makedirs(outdir)
+    figdir = op.join(outdir, 'figures')
+    if not op.exists(figdir):
+        os.mkdir(figdir)
+        
+    base = get_output_names(raw)[0]
+    base += '-ave'
+        
     #### raw as template
     raw = mne.io.read_raw_fif(raw)
     info = raw.info
+    # 'remove' SSS projector
+    info['proc_history'] = []
+    info['proj_id'] = None
+    info['proj_name'] = None
+    
     fwd = mne.read_forward_solution(fwd, force_fixed=True, surf_ori=True)
-    nave = 100
-    #iir_filter = 
     noise_cov = mne.read_cov(noise_cov)
     
+    # Make autocorrelations in the noise using an AR model of order n
+    # (get the denominator coefficients only)
+    iir_filter = mne.time_frequency.fit_iir_model_raw(raw, order=5, tmin=30, tmax=30+60*4)[1]
+    iir_filter[1:] /= np.ceil(np.abs(iir_filter).max()) # unstable filter..?
+    #iir_filter[np.abs(iir_filter) > 1] /= np.ceil(np.abs(iir_filter[np.abs(iir_filter) > 1]))
+    iir_filter=None
     
-    rng = np.random.RandomState(42)
+    #rng = np.random.RandomState(42)
     
-    start, stop = -0.2, 0.5
-    
+    # Time axis
+    start, stop = -0.2, 0.5  
     sfreq = raw.info['sfreq']
     times = np.linspace(start, stop, np.round((stop-start)*sfreq).astype(int))
     
-    #times = np.arange(300, dtype=np.float) / raw.info['sfreq'] - 0.1
     
-    plt.figure()
-    plt.plot(times, stc.data.T)
-    plt.show()
+    # Source time course
+    np.random.seed(42)
+    stc = simulate_sparse_stc(fwd['src'], n_dipoles=1, times=times,
+                              random_state=42, data_fun=sim_er)
     
-    stc = mne.simulation.simulate_sparse_stc(fwd['src'], n_dipoles=2,
-                                             times=times, random_state=42, data_fun=data_fun)
-    evoked = mne.simulation.simulate_evoked(fwd, stc, info, noise_cov, nave)
-    evoked.set_eeg_reference()
+    # Noisy, evoked data
     
+    #chs = mne.io.pick.channel_indices_by_type(info)
+    
+    # Pick MEG and EEG channels
+    meg = [info['ch_names'][i] for i in mne.pick_types(info, meg=True, ref_meg=False)]
+    eeg = [info['ch_names'][i] for i in mne.pick_types(info, meg=False, eeg=True, ref_meg=False)]
+    
+
+    # Simulate evoked data
+    # simulate MEG and EEG data separately, otherwise the whitening is messed
+    # up, then merge
+    #noise_cov2 = noise_cov.copy()
+    #noise_cov2.update(dict(data=noise_cov.data + np.random.random(noise_cov.data.shape) * noise_cov.data))
+    evoked = simulate_evoked(mne.pick_channels_forward(fwd, meg), stc, info,
+                             mne.pick_channels_cov(noise_cov, meg),
+                             nave=nave, iir_filter=iir_filter)
+    evoked_eeg = simulate_evoked(mne.pick_channels_forward(fwd, eeg), stc,
+                                 info, mne.pick_channels_cov(noise_cov, eeg),
+                                 nave=nave, iir_filter=iir_filter)
+    evoked.add_channels([evoked_eeg])
+    evoked.set_eeg_reference(projection=True)#.apply_proj()
+    
+    #evoked.data = mne.filter.filter_data(evoked.data, sfreq, None, 80, fir_design='firwin')
+    evoked.comment = 'Simulation'
+    #evoked.crop(-0.2, 0.5)
+    #stc.crop(-0.2, 0.5)
+    
+    evoked.save(op.join(outdir, base + '.fif'))
+    
+    #picks = mne.pick_types(evoked.info, meg=False, eeg=True)
+    fig = evoked.plot(spatial_colors=True, show=False)
+    fig.savefig(op.join(figdir, base + '.png'))
+    fig = evoked.plot_white(noise_cov, show=False)
+    fig.savefig(op.join(figdir, base + '_whitened.png'))
+    
+    fig = plt.figure()
+    ax = fig.add_subplot(111)
+    ax.plot(stc.times*1e3, stc.data.T*1e9)
+    ax.set_xlabel('Time (ms)')
+    ax.set_ylabel('Amplitude (nAm)')
+    ax.set_title('Simulated Sources')
+    fig.savefig(op.join(figdir, 'simulated_sources.png'))
+    
+    plt.close('all')
+    
+    return evoked, stc
+
     
     
 
-def data_fun(times):
+def sim_er(times):
     """Function to generate random source time courses"""
     
-    sine = 50e-9 * np.sin(30. * times)
+    sine = 50e-9 * np.sin(30. * times + np.random.randn(1)*200)
     
-    peak = 0.17
+    peak = 0.2
     peakshift = 0.05
-    duration = 0.005 # standard deviation of gaussian
-    gaussian = np.exp(-(times - peak + peakshift * rng.randn(1)) ** 2 / duration)
+    duration = 0.01 # standard deviation of gaussian
+    gaussian = np.exp(-(times - peak + peakshift * np.random.randn(1)) ** 2 / duration)
     return sine * gaussian
             
     
