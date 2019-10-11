@@ -2,7 +2,7 @@
 Imports
 """
 
-from autoreject import (compute_thresholds, LocalAutoRejectCV)
+from autoreject import AutoReject#(compute_thresholds, LocalAutoRejectCV)
 from datetime import datetime
     
 from functools import partial
