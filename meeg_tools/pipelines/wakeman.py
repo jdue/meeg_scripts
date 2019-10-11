@@ -772,8 +772,8 @@ def preprocess_autoreject(fname_epochs, stim_delay=0, kappa=None, n_jobs=1):
     rho = np.round(np.arange(nchan/20, nchan/4, nchan/20)).astype(np.int)
     
     # Args for threshold detection function
-    thresh_func = partial(compute_thresholds, method="random_search",
-                          n_jobs=n_jobs)
+    #thresh_func = partial(compute_thresholds, method="random_search",
+    #                      n_jobs=n_jobs)
     
     
     print("Running AutoReject")
@@ -784,8 +784,9 @@ def preprocess_autoreject(fname_epochs, stim_delay=0, kappa=None, n_jobs=1):
     print("rho      : {}\n".format(rho))
     
     # Fit (local) AutoReject using CV
-    ar = LocalAutoRejectCV(rho, kappa, thresh_func=thresh_func)
-
+    #ar = LocalAutoRejectCV(rho, kappa, thresh_func=thresh_func)
+    ar = AutoReject(rho, kappa, thres_method='random_search', n_jobs=n_jobs)
+    
     print('Fitting parameters')
     ar = ar.fit(epochs)
     print('Transforming epochs')
