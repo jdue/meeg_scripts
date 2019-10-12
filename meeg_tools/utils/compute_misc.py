@@ -261,11 +261,12 @@ def get_mri2head_transform(info, fids_mri, scalp=None, project_on_scalp=True, rm
                                      to=FIFF.FIFFV_COORD_HEAD,
                                      trans=trans)
 
+    
+    scalp_trans = scalp.copy()
+    scalp_trans["v"] = mne.transforms.apply_trans(trans, scalp["v"])
     """
     # Refine registration based on all the digitzed digs
     print("Refining transformation")
-    scalp_trans = scalp.copy()
-    scalp_trans["v"] = mne.transforms.apply_trans(trans, scalp["v"])
     
     trans_refine = mne.coreg.fit_point_cloud(digs, scalp_trans["v"], out="trans")
     trans_refine = np.linalg.inv(trans_refine)
