@@ -252,6 +252,8 @@ def get_mri2head_transform(info, fids_mri, scalp=None, project_on_scalp=True, rm
     fids_mri = np.array([fids_mri["nas"], fids_mri["lpa"], fids_mri["rpa"]])
     fids_head = np.array([fids_head["nas"], fids_head["lpa"], fids_head["rpa"]])
     
+    # TRY coregister_fiducials function instead?
+    
     # Determine transformation from MRI to HEAD coordinates using fiducials
     print("Determining initial transformation")
     trans = mne.coreg.fit_matched_points(fids_mri, fids_head)
@@ -259,6 +261,7 @@ def get_mri2head_transform(info, fids_mri, scalp=None, project_on_scalp=True, rm
                                      to=FIFF.FIFFV_COORD_HEAD,
                                      trans=trans)
 
+    """
     # Refine registration based on all the digitzed digs
     print("Refining transformation")
     scalp_trans = scalp.copy()
@@ -271,7 +274,7 @@ def get_mri2head_transform(info, fids_mri, scalp=None, project_on_scalp=True, rm
     
     # The final MRI to HEAD transformation
     trans["trans"] = trans_refine @ trans["trans"]
-    
+    """
     
     # project digitized points on to scalp
     print("Projecting digitized points on scalp")
