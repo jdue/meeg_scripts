@@ -2,6 +2,7 @@
 import numpy as np
 from matplotlib import patches
 import matplotlib.pyplot as plt
+from ..utils import compute_misc
   
 def plot_ica_artifacts(ica, inds, scores, which):
     """Barplot of ICA artifact scores.
@@ -103,11 +104,18 @@ def viz_compare(raw_original, raw, raw_all, picks):
     raw_all.plot(duration=50, order=picks, title="ALL-REG Raw")
     
     
-def viz_ar_bads(ar, show=False):
+def viz_ar_bads(ar, epochs, show=False):
     
-    bad_frac = ar.bad_segments.mean(0)
+    reject_log = ar.get_reject_log(epochs)
+    # There will be nans in the reject corresponding to non-functional channels
     
-    nchan = len(bad_frac)
+    chs = compute_misc.pick_func_channels(epochs.info)
+    #labels = reject_log.labels[:, ar.picks_]
+    bad_frac = (np.nan_to_num(reject_log.labels) > 0).mean(0)
+    
+    #bad_frac = ar.bad_segments.mean(0)
+    
+    nchan = len(ar.picks_)
     
     # Get average rejection threshold across sensors
     #thr = np.mean(ar._local_reject.threshes_["meg" if ch_type in ("mag", "grad") else "eeg"])
@@ -115,19 +123,33 @@ def viz_ar_bads(ar, show=False):
 
     # Plot bad segments, i.e., which channels were deemed bad in which epochs
     
+    fig_bad = reject_log.plot(orientation='horizontal', show=False)
+    """
     fig_bad = plt.figure() #figsize=(15,8)
     ax = fig_bad.add_subplot(111)
-    ax.imshow(ar.bad_segments.T, cmap="gray")
-    for bidx in ar.bad_epochs_idx:
+    ax.imshow(labels.T, cmap="gray")
+    for bidx in np.where(reject_log.bad_epochs)[0]:
         # (x,y), width, heigh, options
         ax.add_patch(patches.Rectangle((bidx-0.5,-0.5), 1, nchan, facecolor="r",
                                        alpha=0.5))
-    ax.set_xlabel("Trial")
+    ax.set_xlabel("Epochs")
     ax.set_ylabel("Channel")
-    ax.set_title("Bad segments (white) and trials (red)")
+    ax.legend(["Good","Bad segments interp.","Bad segments not interp."])
+    ax.set_title("Good (black), bads interp. (grey), bads not interp. (grey), bad epochs (red)")
     fig_bad.tight_layout()
-    
+    """
     # Plot fraction of bad trials per channel
+    fig_frac,axes = plt.subplots(1, len(chs), figsize=(10,5))
+    fig_frac.suptitle("Fraction of bad epochs per channel")
+    for ax,k in zip(axes,chs):
+        v = chs[k]
+        ax.scatter(range(len(v)), bad_frac[v])
+        ax.set_ylim(top=1 + np.abs(ax.get_ylim()[0]))
+        ax.set_xlabel("Channel")
+        ax.set_ylabel("Fraction")
+        ax.set_title(k)
+    
+    """
     fig_frac = plt.figure()
     ax = fig_frac.add_subplot(111)
     ax.scatter(range(nchan), bad_frac, c=bad_frac)
@@ -135,7 +157,7 @@ def viz_ar_bads(ar, show=False):
     ax.set_xlabel("Channel")
     ax.set_ylabel("Fraction")
     ax.set_title("Fraction of bad trials per channel")
-    
+    """
     if show:
         plt.show()
     

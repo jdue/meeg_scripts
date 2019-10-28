@@ -227,8 +227,7 @@ def preprocess_raw(raw, channels=None, filt=None, phys='ica-reg'):
             # add 0.25 which is the approximate duration of the cHPI SSS transition noise
             chpi_duration = [(chpi[0][0]-raw.first_samp)/raw.info["sfreq"] + 2]
             description = ["bad_cHPI_off"]
-            raw.annotations = mne.Annotations(onset, chpi_duration, description,
-                                              orig_time=raw.info["meas_date"])
+            raw.annotations.append(onset, chpi_duration, description)
             
     
     # Squid Jumps
@@ -238,13 +237,15 @@ def preprocess_raw(raw, channels=None, filt=None, phys='ica-reg'):
     
     # Annotate bad segments inplace
     print("Detecting squid jumps / high frequency stuff...")
+    na = len(raw.annotations)
+    """
     try:
         na = len(raw.annotations)
     except TypeError:
         na = 0
         ##################### HANDLE THIS #####################
         #raise ValueError("handle this -> if no annotations exist")
-           
+    """       
     compute_misc.detect_squid_jumps(raw)
     try:
         print("Annotated {} segments as bad".format(len(raw.annotations)-na))
@@ -316,11 +317,11 @@ def preprocess_raw(raw, channels=None, filt=None, phys='ica-reg'):
     # =========================================================================
     
     alpha_level = 0.5
-    try:
-        tmin = 0+chpi_duration[0] # exclude the initial data annotated bad due to cHPI
-    except NameError: # data was not cHPI annotated
-        tmin = 0
-    tmax = np.inf
+    #try:
+    #    tmin = chpi_duration[0] # exclude the initial data annotated bad due to cHPI
+    #except NameError: # data was not cHPI annotated
+    #    tmin = 0
+    #tmax = np.inf
     
     try:
         chpi_freqs = [hpi["coil_freq"][0] for hpi in raw.info["hpi_meas"][0]["hpi_coils"]]
@@ -328,12 +329,14 @@ def preprocess_raw(raw, channels=None, filt=None, phys='ica-reg'):
         # no cHPI info
         chpi_freqs = []
         
-    psd_kwargs = dict(average=False, line_alpha=alpha_level, show=False, verbose=False)
+    psd_kwargs = dict(tmin=0, tmax=np.inf, average=False,
+                      reject_by_annotation=False,
+                      line_alpha=alpha_level, show=False, verbose=False)
     
     # PSDs before filtering
-    fig = raw.plot_psd(tmin, tmax, **psd_kwargs)
+    fig = raw.plot_psd(**psd_kwargs)
     fig.savefig(op.join(figdir, "PSD_0_NoFilter_0-nyquist.pdf"))
-    fig = raw.plot_psd(tmin, tmax, fmin=0, fmax=50, **psd_kwargs)
+    fig = raw.plot_psd(fmin=0, fmax=50, **psd_kwargs)
     fig.savefig(op.join(figdir, "PSD_0_NoFilter_0-50.pdf"))
     
     if any(chpi_freqs) and 'eeg' in chs:
@@ -353,7 +356,7 @@ def preprocess_raw(raw, channels=None, filt=None, phys='ica-reg'):
     
     # 20, 26, 60 ???
     
-    fig = raw.plot_psd(tmin, tmax, **psd_kwargs)
+    fig = raw.plot_psd(**psd_kwargs)
     fig.savefig(op.join(figdir, "PSD_1_Notch_0-nyquist.pdf"))
     
     # Highpass filtering
@@ -364,7 +367,7 @@ def preprocess_raw(raw, channels=None, filt=None, phys='ica-reg'):
             raw.filter(l_freq=filt['fmin'], h_freq=None, picks=np.concatenate((eog, ecg)),
                        fir_design='firwin')
         
-        fig = raw.plot_psd(tmin, tmax, fmin=0, fmax=50, **psd_kwargs)
+        fig = raw.plot_psd(fmin=0, fmax=50, **psd_kwargs)
         fig.savefig(op.join(figdir, "PSD_2_NotchHigh_0-50.pdf"))
     
     # Lowpass filtering
@@ -375,7 +378,7 @@ def preprocess_raw(raw, channels=None, filt=None, phys='ica-reg'):
             raw.filter(l_freq=None, h_freq=filt['fmax'], picks=np.concatenate((eog, ecg)),
                        fir_design='firwin')
         
-        fig = raw.plot_psd(tmin, tmax, **psd_kwargs)
+        fig = raw.plot_psd(**psd_kwargs)
         fig.savefig(op.join(figdir,"PSD_3_NotchHighLow_0-nyquist.pdf"))
     plt.close("all")
     
@@ -399,20 +402,29 @@ def preprocess_raw(raw, channels=None, filt=None, phys='ica-reg'):
     
     if phys == "ica-reg":
         print("Using ICA and RLS")
+        ranks = mne.compute_rank(raw, rank="info")
         for ch, picks in chs.items():
             #if ch == 'eeg':
             #    picks = np.concatenate((chs["eeg"], eog, ecg))
             nchan = len(picks)
             
+            if ch == 'eeg':
+                rank = ranks['eeg']
+            elif ch in ['grad', 'mag']:
+                rank = ranks['meg']
+            else:
+                raise ValueError('something went wrong here...')
+            
             print("Processing {} {} channels".format(nchan, ch.upper()))
             #tol = 1e-6
-            rank = raw.estimate_rank(0, None, picks=picks)
+            #rank = raw.estimate_rank(0, None, picks=picks)
+            
             #print("Estimated rank is {}".format(rank))
             print("Using {} principal components for ICA decomposition".format(rank))
             #rank = mne.utils.estimate_rank(raw[picks][0])
             
             # Fit ICA
-            method = "extended-infomax"
+            method = "infomax"
             ica = mne.preprocessing.ICA(n_components=int(rank), method=method,
                                         noise_cov=None)
             ica.fit(raw, picks=picks, reject_by_annotation=False)
@@ -785,7 +797,7 @@ def preprocess_autoreject(fname_epochs, stim_delay=0, kappa=None, n_jobs=1):
     
     # Fit (local) AutoReject using CV
     #ar = LocalAutoRejectCV(rho, kappa, thresh_func=thresh_func)
-    ar = AutoReject(rho, kappa, thres_method='random_search', n_jobs=n_jobs)
+    ar = AutoReject(rho, kappa, thresh_method='random_search', n_jobs=n_jobs)
     
     print('Fitting parameters')
     ar = ar.fit(epochs)
@@ -808,9 +820,9 @@ def preprocess_autoreject(fname_epochs, stim_delay=0, kappa=None, n_jobs=1):
     mne.evoked.write_evokeds(evo_name, clean_evoked)
     
     # Visualize results of autoreject
-    
     # Bad segments
-    fig_bad, fig_frac = visualize_misc.viz_ar_bads(ar)
+    fig_bad, fig_frac = visualize_misc.viz_ar_bads(ar, epochs)
+    
     fig_name = op.join(figdir, "Epochs_bad_segments.pdf")
     fig_bad.savefig(fig_name, bbox_inches="tight")
     fig_name = op.join(figdir, "Epochs_bad_fractions.pdf")
@@ -818,7 +830,9 @@ def preprocess_autoreject(fname_epochs, stim_delay=0, kappa=None, n_jobs=1):
     
     # Check for bad channels
     bad_cutoff = 0.5
-    bad_frac = ar.bad_segments.mean(0)
+    reject_log = ar.get_reject_log(epochs)
+    bad_frac = (np.nan_to_num(reject_log.labels) > 0).mean(0)
+    #bad_frac = ar.bad_segments.mean(0)
     possible_bads = [epochs.ch_names[bad] for bad in np.where(bad_frac>bad_cutoff)[0]]
     
     for cevo in clean_evoked:                
@@ -965,7 +979,7 @@ def cov_epochs(epochs, cov_type='noise', outdir=None):
     
     print('Using time window {} to {}'.format(*win))
     cov = mne.compute_covariance(epochs, tmin=win[0], tmax=win[1],
-                                 method="shrunk")
+                                 method="shrunk", rank="info")
     cov_name = op.join(outdir, "{}_{}-cov.fif".format(basename, cov_type))
     cov.save(cov_name)
     
@@ -2018,14 +2032,18 @@ def plot_inverse(sd, config, i=None):
                     os.remove(f)
 
 def do_inverse(evoked, noise_cov, fwd, twin, method='dSPM', signal_cov=None,
-               fwd_normal=False,
-               crop=False, outdir=None):
+               loose=0.2, crop=False, outdir=None):
     """
     
     time : float | list
         Time (time window) at which the SNR is estimated.
     
+    loose : float (interval 0 - 1)
+        Weighting of source space components. 0 corresponds to a fixed surface orientation (i.e., normal to the surface), 1 corresponds to free orientation (x,y,z weighted equally). 
+    
     """
+    
+    assert isinstance(crop, bool)
 
     
     # MINIMUM NORM
@@ -2052,16 +2070,23 @@ def do_inverse(evoked, noise_cov, fwd, twin, method='dSPM', signal_cov=None,
     evoked = mne.read_evokeds(evoked)
     
     if isinstance(noise_cov, str):
-        noise_cov = mne.read_cov(noise_cov)
+        noise_cov = mne.read_cov(noise_cov, verbose=False)
     if isinstance(fwd, str):
-        fwd = mne.read_forward_solution(fwd)
+        fwd = mne.read_forward_solution(fwd, verbose=False)
     if isinstance(signal_cov, str):
-        signal_cov = mne.read_cov(signal_cov)
+        signal_cov = mne.read_cov(signal_cov, verbose=False)
+    
+    """ 
+    is_surf = lambda x: x['id'] in (FIFF.FIFFV_MNE_SURF_LEFT_HEMI,
+                                    FIFF.FIFFV_MNE_SURF_RIGHT_HEMI)
+    assert all([is_surf(s) for s in fwd['src']]), 'Source space must be on a surface for normals to be meaningful'
         
-    if fwd_normal:
-        print('Converting forward solution to surface normals')
-        fwd = mne.forward.convert_forward_solution(fwd, surf_ori=True, force_fixed=True)
-        
+    print('Converting forward solution to surface normals')
+    fwd = mne.forward.convert_forward_solution(fwd, force_fixed=True)
+    loose = 0 # fixed orientation (surface normal)
+    
+    loose = 1.0 # free orientation, i.e., all components are weighted equal 
+    """
     if method == 'LCMV':
         assert signal_cov is not None, 'Signal covariance must be provided with LCMV beamformer'
         
@@ -2105,9 +2130,10 @@ def do_inverse(evoked, noise_cov, fwd, twin, method='dSPM', signal_cov=None,
                 
                 # Make an MEG inverse operator
                 print("Making inverse operator")
-                inv = mne.minimum_norm.make_inverse_operator(evo.info, fwd, noise_cov,
-                                                             loose=None, depth=None,
-                                                             fixed=fwd_normal)
+                # default depth weighting is 0.8
+                inv = mne.minimum_norm.make_inverse_operator(evo.info, fwd,
+                                                    noise_cov, loose=loose,
+                                                    verbose=False)
                 
                 # Estimate SNR
                 print("Estimating SNR at {} ms".format(tms))
@@ -2119,10 +2145,10 @@ def do_inverse(evoked, noise_cov, fwd, twin, method='dSPM', signal_cov=None,
                 lambda2 = 1/snr_estimate**2
                 
                 print("Preparing inverse operator")
-                inv = mne.minimum_norm.prepare_inverse_operator(inv, evo.nave, lambda2, method)
+                inv = mne.minimum_norm.prepare_inverse_operator(inv, evo.nave, lambda2, method, verbose=False)
                 
                 print("Applying inverse operator")
-                stc = mne.minimum_norm.apply_inverse(evo, inv, lambda2, method, prepared=True)
+                stc = mne.minimum_norm.apply_inverse(evo, inv, method, prepared=True, verbose=False)
                 
                 print('Computing cost function')
                 cost, we, jp = compute_MNE_cost(evo, inv, lambda2, twin, return_parts=True)
@@ -2137,12 +2163,12 @@ def do_inverse(evoked, noise_cov, fwd, twin, method='dSPM', signal_cov=None,
                 stc.crop(*twin) # to save space
                 
             print("Writing source estimate")
-            stc_name = op.join(outdir, basename+'_{}'.format(ch))
+            stc_name = op.join(outdir, basename+'_{}_{}'.format(condition.replace(' ', '_'), ch))
             stc.save(stc_name)
             stcs.append(stc_name)
             
             
-            np.savetxt(op.join(outdir, 'cost_'+basename+'_{}'.format(ch)+'.txt'), np.asarray([we, jp, cost]))
+            #np.savetxt(op.join(outdir, 'cost_'+basename+'_{}'.format(ch)+'.txt'), np.asarray([we, jp, cost]))
         
             evo = evoc.copy()
         # if plot:
@@ -2154,7 +2180,7 @@ def do_inverse(evoked, noise_cov, fwd, twin, method='dSPM', signal_cov=None,
         #plt.plot(stc.times, stc.data[idx].T)
         #plt.show()
         
-    return cost
+    return stcs
     
 def prepare_simulated(sd, config, i=None):
     

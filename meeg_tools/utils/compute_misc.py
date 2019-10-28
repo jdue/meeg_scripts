@@ -24,6 +24,19 @@ def triangle_normal(vertices, faces):
     tnormals /= np.sqrt(np.sum(tnormals**2,1))[:,np.newaxis]
     
     return tnormals
+    
+def vertex_normals(vertices, faces):
+    """
+    
+    """
+    face_normals = triangle_normal(vertices, faces)
+    
+    out = np.zeros_like(vertices)
+    for i in range(len(faces)):
+        out[faces[i]] += face_normals[i]
+    out /= np.linalg.norm(out, ord=2, axis=1)[:, None]
+        
+    return out
 
 def ica_unmix(ica, data, picks=None):
     """Project measurements to sources
@@ -36,9 +49,9 @@ def ica_unmix(ica, data, picks=None):
      
     # Prewhiten
     if ica.noise_cov is None:
-        data = data/ica._pre_whitener
+        data = data/ica.pre_whitener_
     else:
-        data = ica._pre_whitener @ data
+        data = ica.pre_whitener_ @ data
     
     # Center per channel (prior to PCA)
     if ica.pca_mean_ is not None:
@@ -66,9 +79,9 @@ def ica_mix(ica, sources):
     
     # Undo prewhitening to restore scaling of data
     if ica.noise_cov is None:
-        data *= ica._pre_whitener
+        data *= ica.pre_whitener_
     else:
-        data = np.linalg.pinv(ica._pre_whitener) @ data
+        data = np.linalg.pinv(ica.pre_whitener_) @ data
         
     return data
 
@@ -452,10 +465,17 @@ def detect_squid_jumps(raw, time=0.1, threshold=4, description = "bad_jump"):
     
     jumps = (jumps+raw.first_samp) / raw.info["sfreq"]
     for onset, offset in jumps.reshape(-1,2): 
-
+        skip = False
+        # check if segment is already included in an annotation
+        for a in raw.annotations:
+            if onset >= a['onset'] and onset <= a['onset']+a['duration'] or \
+               offset >= a['onset'] and offset <= a['onset']+a['duration']:
+               skip = True
+               break
         # onset : time in seconds relative to first_samp (!)
         # duration : time in seconds
-        if raw.annotations is None:
-            raw.annotations = mne.Annotations(onset, offset-onset, description)
-        else:
+        #if raw.annotations is None:
+        #    raw.annotations = mne.Annotations(onset, offset-onset, description)
+        #else:
+        if not skip:
             raw.annotations.append(onset, offset-onset, description)

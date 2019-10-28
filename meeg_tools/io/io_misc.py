@@ -2,6 +2,7 @@
 
 from itertools import islice
 import mne
+from mne.io.constants import FIFF
 import nibabel as nib
 import numpy as np
 import os
@@ -214,6 +215,10 @@ def as_vtk(digs, cells=None, pointdata=None, celldata=None):
         elif len(cells[0]) is 4:
             cells = dict(tetra=cells)
     
+    structure = pyvtk.UnstructuredGrid(digs, **cells)
+    header = 'VTK data'
+    vtk = pyvtk.VtkData(structure, header)
+                      
     # Determine field types and assemble DataSets
     if pointdata is not None:
         assert isinstance(pointdata, dict)
@@ -234,15 +239,16 @@ def as_vtk(digs, cells=None, pointdata=None, celldata=None):
                 raise ValueError("must be 1 or 3...")
         
         # Assemble
-        pd = pyvtk.PointData()
+        #pd = pyvtk.PointData()
         for k,v in pointdata.items():
             if pft[k] == "scalar":
                  x = pyvtk.Scalars(v,name=k)
             elif pft[k] == "vector":
                  x = pyvtk.Vectors(v,name=k)
-            pd.append(x)
-    else:
-        pd = None
+            #pd.append(x)
+            vtk.point_data.append(x)
+    #else:
+    #    pd = None
                 
     if celldata is not None:
         assert isinstance(celldata, dict)
@@ -262,19 +268,16 @@ def as_vtk(digs, cells=None, pointdata=None, celldata=None):
             else:
                 raise ValueError("must be 1 or 3...")
     
-        cd = pyvtk.CellData()       
+        #cd = pyvtk.CellData()       
         for k,v in celldata.items():
             if cft[k] == "scalar":
                  x = pyvtk.Scalars(v,name=k)
             elif cft[k] == "vector":
                  x = pyvtk.Vectors(v,name=k)
-            cd.append(x)
-    else:
-        cd = None
-    
-    header = 'VTK data'
-    vtk = pyvtk.VtkData(pyvtk.UnstructuredGrid(digs, **cells), header, pd, cd)
-                        #cell_data=cd)
+            #cd.append(x)
+            vtk.cell_data.append(x)
+    #else:
+    #    cd = None
     
     return vtk
     
@@ -326,52 +329,141 @@ def read_data(fname, verbose=False):
     else:
         raise IOError("Input is neither file nor directory.")
 
-def prepare_sourcespace(source_locations, source_normals=None, sid=None):
+def prepare_sourcespace(pos, tris=None, coord_frame='mri', surf_id=None):
     """Setup the a discrete MNE source space object (as this is more flexible
     than the surface source space).
     
-    
+    pos :
+        Source positions
+    tris :
+        If source positions are vertices of a surface, this defines the
+        surface.
+    coord_frame :
+        mri or head
+            
     sid : 
-        Subject ID
+        surface id. lh, rh, or None.
     """
     
+    # mm -> m (input assumed to be in mm)
+    pos *= 1e-3
     
-    # setup discrete src...
+    # source normals
+    if tris is None: # Define an arbitrary direction
+        nn = np.tile(np.eye(3), (len(pos), 1))
+    else:
+        nn = None # calculate later
     
-    # np.tile(np.eye(3), (len(source_locations), 1)) # Source orientations: x, y, and z
+    if coord_frame == 'mri':
+        coord_frame = FIFF.FIFFV_COORD_MRI
+    elif coord_frame == 'head':
+        coord_frame = FIFF.FIFFV_COORD_HEAD
+    else:
+        raise ValueError('coord_frame must be mri or head')
     
-    if source_normals is None:
-        # Define an arbitrary direction
-        source_normals = np.zeros_like(source_locations)
-        source_normals[:,2] = 1.0
+    assert surf_id in ('lh', 'rh', None)
+    if surf_id == 'lh':
+        surf_id = FIFF.FIFFV_MNE_SURF_LEFT_HEMI
+    elif surf_id == 'rh':
+        surf_id = FIFF.FIFFV_MNE_SURF_RIGHT_HEMI
+    elif surf_id is None:
+        surf_id = FIFF.FIFFV_MNE_SURF_UNKNOWN
+        
+    # Assumed to be in mm, thus mm -> m
+    #pos = dict(
+    #    rr = pos * 1e-3,
+    #    nn = source_normals * 1e-3
+    #    )
+    #src = mne.setup_volume_source_space(subject=None, pos=pos, verbose=False)
+    npos = len(pos)
     
-    # Assumed to be in meters
-    pos = dict(rr=source_locations*1e-3, nn=source_normals*1e-3)
-    src = mne.setup_volume_source_space(subject=sid, pos=pos)
+    src = dict(
+        id = surf_id,
+        type = 'discrete',
+        np = npos,
+        ntri = 0,
+        coord_frame = coord_frame,
+        rr = pos,
+        nn = nn,
+        tris = None,
+        nuse = npos,
+        inuse = np.ones(npos),
+        vertno = np.arange(npos),
+        nuse_tri = 0,
+        use_tris = None    
+        )
+    
+    # Unused stuff
+    src.update(dict(
+        nearest = None,
+        nearest_dist = None,
+        pinfo = None,
+        patch_inds = None,
+        dist = None,
+        dist_limit = None,
+        subject_his_id = None
+        ))
+    
+    if tris is not None:
+        # Setup as surface source space
+        # MNE doesn't like surface source spaces that are not LH or RH
+        assert src['id'] in (FIFF.FIFFV_MNE_SURF_LEFT_HEMI,
+                             FIFF.FIFFV_MNE_SURF_RIGHT_HEMI)
+        surf = dict(rr=pos, tris=tris)
+        surf = mne.surface.complete_surface_info(surf)
+        
+        src['type'] = 'surf'
+        src['tris'] = surf['tris']
+        src['ntri'] = surf['ntri']
+        src['nn'] = surf['nn'] # vertex normals
+        
+        # we use all tris, so the following are not really used
+        src['use_tris'] = None # else [nuse_tri x 3] of indices into src['tris'] 
+        src['nuse_tri'] = 0    # else len(src['use_tris'])
+    
+    src = [src]
+    
+    return mne.source_space.SourceSpaces(src) 
 
-    return src
-
-def sourcespace_from_files(files):
-    
+def sourcespace_from_files(files, coord_frame='mri', surf_id=None):
+    """
+    If surf_id is None and the filenames starts with 'lh' or 'rh' assume left
+    and right hemisphere, respectively, else set 'unknown' as source space id.
+    Else surf_id show be a list of entries corresponding to the input files.
+    """
     # Read and prepare the source space
     if isinstance(files, str):
         files = [files]
     assert isinstance(files, list)
     
-    src = []
-    for f in files:
+    if surf_id is not None:
+        assert len(surf_id) == len(files)
+    else:
+        surf_id = [None]*len(files)
+    
+    src = []    
+    for f,this_id in zip(files, surf_id):
+        # Source space id
+        if this_id is None:
+            base = op.basename(f)
+            if base.startswith('lh'):
+                this_id = 'lh'
+            elif base.startswith('rh'):
+                this_id = 'rh'
+        
         if f.endswith('.nii') or f.endswith('.nii.gz'):
             # Assume a (binary) nifti image
             img = nib.load(f)
             x,y,z = np.where(img.get_data() > 0)
-            coo = np.concatenate((x[:,None], y[:,None], z[:,None]),axis=1)
-            coo = mne.transforms.apply_trans(img.affine, coo)
+            pos = np.concatenate((x[:,None], y[:,None], z[:,None]),axis=1)
+            pos = mne.transforms.apply_trans(img.affine, coo)
+            tris = None
         else:
             # Assume it is a file defining a mesh
-            coo, _ = read_surface(f)
-        src.append(prepare_sourcespace(coo))
+            pos, tris = read_surface(f)
+        src.append(prepare_sourcespace(pos, tris, coord_frame, this_id))
     
-    if type(src) == list:
+    if isinstance(src, list):
         src = concat_sourcespaces(src)
     
     return src
@@ -380,7 +472,7 @@ def concat_sourcespaces(src):
     """Concatenate instances of SourceSpaces.
     """
     # list is the base class of SourceSpaces so isinstance will not work
-    if not type(src)==list:
+    if not isinstance(src, list):
        src = [src]
     if len(src) == 1:
         return src[0]
