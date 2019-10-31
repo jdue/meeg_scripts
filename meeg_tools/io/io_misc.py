@@ -348,11 +348,13 @@ def prepare_sourcespace(pos, tris=None, coord_frame='mri', surf_id=None):
     # mm -> m (input assumed to be in mm)
     pos *= 1e-3
     
-    # source normals
-    if tris is None: # Define an arbitrary direction
-        nn = np.tile(np.eye(3), (len(pos), 1))
+    # Source normals
+    if tris is None:
+        # Define an arbitrary direction
+        nn = np.zeros((npos, 3))
+        nn[:, 2] = 1.0
     else:
-        nn = None # calculate later
+        nn = None # Calculate later
     
     if coord_frame == 'mri':
         coord_frame = FIFF.FIFFV_COORD_MRI
