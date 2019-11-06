@@ -4,6 +4,8 @@ import numpy as np
 from sklearn.preprocessing import StandardScaler
 from warnings import warn
 
+mne.set_log_level(verbose='WARNING')
+
 def triangle_normal(vertices, faces):
     """Get normal vectors for each triangle in the mesh.
 

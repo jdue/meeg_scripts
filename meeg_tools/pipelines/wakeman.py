@@ -31,7 +31,7 @@ from meeg_tools.viz import visualize_misc
 from sklearn.model_selection import KFold
 from scipy.stats import sem
 
-#mne.set_log_level(verbose='WARNING')
+mne.set_log_level(verbose='WARNING')
 
 #import matplotlib as mpl
 #mpl.use('Qt4Agg')
@@ -2070,11 +2070,11 @@ def do_inverse(evoked, noise_cov, fwd, twin, method='dSPM', signal_cov=None,
     evoked = mne.read_evokeds(evoked)
     
     if isinstance(noise_cov, str):
-        noise_cov = mne.read_cov(noise_cov, verbose=False)
+        noise_cov = mne.read_cov(noise_cov)
     if isinstance(fwd, str):
-        fwd = mne.read_forward_solution(fwd, verbose=False)
+        fwd = mne.read_forward_solution(fwd)
     if isinstance(signal_cov, str):
-        signal_cov = mne.read_cov(signal_cov, verbose=False)
+        signal_cov = mne.read_cov(signal_cov)
     
     """ 
     is_surf = lambda x: x['id'] in (FIFF.FIFFV_MNE_SURF_LEFT_HEMI,

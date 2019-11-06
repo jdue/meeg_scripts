@@ -11,6 +11,8 @@ import pyvtk
 
 from ..utils.compute_misc import triangle_normal
 
+mne.set_log_level(verbose='WARNING')
+
 def read_surface(fname):
     """Load a surface mesh in either .off or .stl file format. Return the 
     vertices and faces of the mesh. If .stl file, assumes only one solid, i.e. 
@@ -47,13 +49,17 @@ def read_surface(fname):
         
     elif fname.endswith('stl'):
         # test if ascii. If not, assume binary        
-        with open(fname, "r") as f:
-            if f.readline().split()[0] == "solid":
-                is_binary = False
-            else:
-                is_binary = True
-                
-        if is_binary:
+        try:
+            vertices = []
+            with open(fname,"r") as f:
+                for line in f:
+                    line = line.lstrip().split()
+                    if line[0] == "vertex":
+                        vertices.append(line[1:])
+            vertices = np.array(vertices, dtype=np.float)
+        
+        except UnicodeDecodeError:
+            # looks like we have a binary file    
             with open(fname, "rb") as f:
                 # Skip the header (80 bytes), read number of triangles (1
                 # byte). The rest is the data.
@@ -63,15 +69,6 @@ def read_surface(fname):
             data = data.reshape((-1,25))[:,:24].copy().view(np.float32)
             vertices = data[:,3:].reshape(-1,3) # discard the triangle normals
             
-        else:
-            vertices = []
-            with open(fname,"r") as f:
-                for line in f:
-                    line = line.lstrip().split()
-                    if line[0] == "vertex":
-                        vertices.append(line[1:])
-            vertices = np.array(vertices, dtype=np.float)
-        
         # The stl format does not contain information about the faces, hence we
         # will need to figure this out.
         faces = np.arange(len(vertices)).reshape(-1,3)
