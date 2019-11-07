@@ -49,14 +49,17 @@ def read_surface(fname):
         
     elif fname.endswith('stl'):
         # test if ascii. If not, assume binary        
+        
+        # mesh_flat
+        #   rows 0-2 are the vertices of the 1st triangle etc.
         try:
-            vertices = []
+            mesh_flat = []
             with open(fname,"r") as f:
                 for line in f:
                     line = line.lstrip().split()
                     if line[0] == "vertex":
-                        vertices.append(line[1:])
-            vertices = np.array(vertices, dtype=np.float)
+                        mesh_flat.append(line[1:])
+            mesh_flat = np.array(mesh_flat, dtype=np.float)
         
         except UnicodeDecodeError:
             # looks like we have a binary file    
@@ -67,31 +70,40 @@ def read_surface(fname):
                 np.fromfile(f, dtype=np.uint32, count=1)[0]
                 data = np.fromfile(f, dtype=np.uint16, count=-1)
             data = data.reshape((-1,25))[:,:24].copy().view(np.float32)
-            vertices = data[:,3:].reshape(-1,3) # discard the triangle normals
+            mesh_flat = data[:,3:].reshape(-1,3) # discard the triangle normals
             
         # The stl format does not contain information about the faces, hence we
         # will need to figure this out.
-        faces = np.arange(len(vertices)).reshape(-1,3)
-
-        # Remove vertice duplicates and sort rows by sum  
-        # Seed for reproducibility (otherwise faces would be difference each
-        # time the file is read)
-        np.random.seed(0)
-        sv = np.sum(vertices+vertices*(100*np.random.random(3))[np.newaxis,:],
-                    axis=1)
-        sv_arg = np.argsort(sv)
-        sv_arg_rev = np.argsort(sv_arg) # reverse indexing for going back
         
-        # Get unique rows, indices of these, and counts. Create the new indices
-        # and repeat them
-        u, u_idx, u_count = np.unique(sv[sv_arg],return_index=True,
-                                      return_counts=True)
-        repeat_idx = np.repeat(np.arange(len(u)), u_count)
+        # Get the unique vertices (by using str repr of rows)
+        # Use the indices into the unique vertices as faces
+        vs = [' '.join(v) for v in mesh_flat.astype(str)]
+        _, uidx, iidx = np.unique(vs, return_index=True, return_inverse=True)
+        vertices = mesh_flat[uidx]
+        faces = iidx.reshape(-1, 3)
         
-        # Retain only unique vertices and modify faces accordingly
-        vertices = vertices[sv_arg][u_idx]
-        faces = repeat_idx[sv_arg_rev][faces]
-            
+        # OBSOLETE ...
+        # faces = np.arange(len(vertices)).reshape(-1,3)
+        #
+        # # Remove vertice duplicates and sort rows by sum  
+        # # Seed for reproducibility (otherwise faces would be difference each
+        # # time the file is read)
+        # np.random.seed(0)
+        # sv = np.sum(vertices+vertices*(100*np.random.random(3))[np.newaxis,:],
+                    # axis=1)
+        # sv_arg = np.argsort(sv)
+        # sv_arg_rev = np.argsort(sv_arg) # reverse indexing for going back
+        
+        # # Get unique rows, indices of these, and counts. Create the new indices
+        # # and repeat them
+        # u, u_idx, u_count = np.unique(sv[sv_arg],return_index=True,
+                                      # return_counts=True)
+        # repeat_idx = np.repeat(np.arange(len(u)), u_count)
+        
+        # # Retain only unique vertices and modify faces accordingly
+        # vertices = vertices[sv_arg][u_idx]
+        # faces = repeat_idx[sv_arg_rev][faces]
+        
     elif fname.endswith('gii'):
         gii = nib.load(fname)
         vertices, faces = gii.darrays[0].data, gii.darrays[1].data
