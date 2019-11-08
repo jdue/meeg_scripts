@@ -48,10 +48,12 @@ def read_surface(fname):
                                      usecols=(1,2,3)).astype(np.uint)
         
     elif fname.endswith('stl'):
-        # test if ascii. If not, assume binary        
-        
         # mesh_flat
-        #   rows 0-2 are the vertices of the 1st triangle etc.
+        #   rows 0-2 are the vertices of the 1st triangle
+        #   rows 3-5 are the vertices of the 2nd triangle
+        #   etc.
+        
+        # try to read as ascii
         try:
             mesh_flat = []
             with open(fname,"r") as f:
@@ -78,33 +80,11 @@ def read_surface(fname):
         # Get the unique vertices by viewing the array as a structured data
         # type where each column corresponds to a field of the same data type
         # as the original array (thus, each row becomes 'one object')
-        # Use the indices into the unique vertices as faces
+        # Use the inverse indices into the unique vertices as faces
         view = mesh_flat.view([("", mesh_flat.dtype)] * mesh_flat.shape[1])
         _, uidx, iidx = np.unique(view, return_index=True, return_inverse=True)
         vertices = mesh_flat[uidx]
         faces = iidx.reshape(-1, 3)
-        
-        # OBSOLETE ...
-        # faces = np.arange(len(vertices)).reshape(-1,3)
-        #
-        # # Remove vertice duplicates and sort rows by sum  
-        # # Seed for reproducibility (otherwise faces would be difference each
-        # # time the file is read)
-        # np.random.seed(0)
-        # sv = np.sum(vertices+vertices*(100*np.random.random(3))[np.newaxis,:],
-                    # axis=1)
-        # sv_arg = np.argsort(sv)
-        # sv_arg_rev = np.argsort(sv_arg) # reverse indexing for going back
-        
-        # # Get unique rows, indices of these, and counts. Create the new indices
-        # # and repeat them
-        # u, u_idx, u_count = np.unique(sv[sv_arg],return_index=True,
-                                      # return_counts=True)
-        # repeat_idx = np.repeat(np.arange(len(u)), u_count)
-        
-        # # Retain only unique vertices and modify faces accordingly
-        # vertices = vertices[sv_arg][u_idx]
-        # faces = repeat_idx[sv_arg_rev][faces]
         
     elif fname.endswith('gii'):
         gii = nib.load(fname)
