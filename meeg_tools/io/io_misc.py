@@ -75,10 +75,12 @@ def read_surface(fname):
         # The stl format does not contain information about the faces, hence we
         # will need to figure this out.
         
-        # Get the unique vertices (by using str repr of rows)
+        # Get the unique vertices by viewing the array as a structured data
+        # type where each column corresponds to a field of the same data type
+        # as the original array (thus, each row becomes 'one object')
         # Use the indices into the unique vertices as faces
-        vs = [' '.join(v) for v in mesh_flat.astype(str)]
-        _, uidx, iidx = np.unique(vs, return_index=True, return_inverse=True)
+        view = mesh_flat.view([("", mesh_flat.dtype)] * mesh_flat.shape[1])
+        _, uidx, iidx = np.unique(view, return_index=True, return_inverse=True)
         vertices = mesh_flat[uidx]
         faces = iidx.reshape(-1, 3)
         
