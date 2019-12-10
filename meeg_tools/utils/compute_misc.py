@@ -6,6 +6,51 @@ from warnings import warn
 
 mne.set_log_level(verbose='WARNING')
 
+def adjacency_matrix_of_elements(e):
+    """Return the adjacency matrix of the elements.    
+    
+    Useful for example for finding connected components by element faces, e.g.,
+    
+        n_comps, labels = ss.csgraph.connected_components(A)
+
+    e : array describing the elements, e.g., triangles or tetrahedra
+    
+    """
+    from itertools import combinations
+    import scipy.sparse as ss
+    
+    ne, edim = e.shape
+    v_per_face = edim-1
+
+    # Make the edges (triangles) / faces (tetrahedra)
+    sf = np.sort(e, axis=1)
+    # combinations: e.g., (0,1), (0,2), (1,2)
+    c = [i for c in combinations(np.arange(edim), v_per_face) for i in c] 
+    
+    # an edge consists of two (triangles) or three (tetrahedra)
+    dt = np.dtype([("", e.dtype)] * v_per_face)
+    
+    edges = sf[:, c].ravel().view(dt)
+
+    # argsort to bring like edges (and thus connected elemenets) next to each
+    # other, thus 0,1 are connected, 2,3 etc.
+    
+    sedges = np.argsort(edges)
+
+    # convert edge indices to element indices
+    # each element has 'edim' edges/faces and this consists of 'v_per_face' vertices
+    # idx : each row has indices of two elements that are connected
+    idx = np.floor(sedges/edim).astype(np.int).reshape(-1, v_per_face)
+    # to make A symmetric
+    idx = np.vstack((idx, idx[:,::-1]))
+
+    data = np.ones(len(idx), dtype=np.int)
+
+    # adjacency matrix of elements
+    A = ss.coo_matrix( (data, (idx[:,0], idx[:,1])) , shape=(ne,ne))
+    
+    return A
+
 def triangle_normal(vertices, faces):
     """Get normal vectors for each triangle in the mesh.
 

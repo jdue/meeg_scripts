@@ -132,9 +132,11 @@ def write_surface(vertices, faces, fname, file_format="off", binary=True):
         with open(fname, "w") as f:
             f.write("OFF\n")
             f.write("# (optional comments) \n\n")
-        np.savetxt(fname,np.array([nVertices,nFaces,0])[np.newaxis,:],fmt="%u")
-        np.savetxt(fname,vertices,fmt="%0.6f")
-        np.savetxt(fname,np.concatenate((np.repeat(faces.shape[1],nFaces)[:,np.newaxis],faces),axis=1).astype(np.uint),fmt="%u")
+        f = open(fname, 'a')
+        np.savetxt(f,np.array([nVertices,nFaces,0])[np.newaxis,:],fmt="%u")
+        np.savetxt(f,vertices,fmt="%0.6f")
+        np.savetxt(f,np.concatenate((np.repeat(faces.shape[1],nFaces)[:,np.newaxis],faces),axis=1).astype(np.uint),fmt="%u")
+        f.close()
     
     elif file_format == "stl":
         mesh = vertices[faces]
