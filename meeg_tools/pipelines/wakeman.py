@@ -1152,6 +1152,12 @@ def xdawn_cv(epochs, signal_cov, component_grid=None, nfolds=5, cv_curve=True):
         # the 'best' model
         idx_opt = mean.argmin()
         idx_sel = np.where(mean < mean[idx_opt]+SE[idx_opt])[0][0]
+        # in this case, being conservative is perhaps to just use
+        
+        #idx_sel = idx_opt
+        
+        # so as rather keep a little too much noise and retain as much signal as possible than
+        # risking to sacrifice signal?
         
         # The number of components
         n_components_cv[eid] = component_grid[idx_sel]
