@@ -1019,7 +1019,8 @@ def preprocess_xdawn(epochs, signal_cov, stim_delay=0):
         
         print('Denoising using xDAWN')
         print('Estimating parameters using cross validation')
-        n_components, fig = xdawn_cv(epo, signal_cov_data)
+        component_grid = np.arange(25)+1 # first 25 components
+        n_components, fig = xdawn_cv(epo, signal_cov_data, component_grid)
         fig.set_size_inches(10,5)
         fig.savefig(op.join(figdir, '{}_{}_xdawn_cv.pdf').format(basename, ch))
     
