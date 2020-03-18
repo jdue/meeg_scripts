@@ -81,11 +81,20 @@ def read_surface(fname):
         # type where each column corresponds to a field of the same data type
         # as the original array (thus, each row becomes 'one object')
         # Use the inverse indices into the unique vertices as faces
-        dt = np.dtype([("", mesh_flat.dtype)] * mesh_flat.shape[1])
-        _, uidx, iidx = np.unique(mesh_flat.view(dt), return_index=True,
+        
+        #dt = np.dtype([("", mesh_flat.dtype)] * mesh_flat.shape[1])
+        #_, uidx, iidx = np.unique(mesh_flat.view(dt), return_index=True,
+        #                          return_inverse=True)
+        _, uidx, iidx = np.unique(mesh_flat, axis=0, return_index=True,
                                   return_inverse=True)
-        vertices = mesh_flat[uidx]
-        faces = iidx.reshape(-1, 3)
+        # sort indices to preserve original ordering of the points
+        q = np.argsort(uidx)
+        vertices = mesh_flat[uidx[q]]
+        # We have swapped around the points so we need to update iidx.
+        # q[0] is the first point, thus we need to replace all
+        # occurrences of q[0] in iidx with 0 and so on.
+        # sort q to get the correct triangle mapping    
+        faces = np.argsort(q)[iidx].reshape(-1, 3)
         
     elif fname.endswith('gii'):
         gii = nib.load(fname)
