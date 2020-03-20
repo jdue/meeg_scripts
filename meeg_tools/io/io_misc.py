@@ -350,6 +350,7 @@ def prepare_sourcespace(pos, tris=None, coord_frame='mri', surf_id=None):
     
     # mm -> m (input assumed to be in mm)
     pos *= 1e-3
+    npos = len(pos)
     
     # Source normals
     if tris is None:
@@ -380,7 +381,6 @@ def prepare_sourcespace(pos, tris=None, coord_frame='mri', surf_id=None):
     #    nn = source_normals * 1e-3
     #    )
     #src = mne.setup_volume_source_space(subject=None, pos=pos, verbose=False)
-    npos = len(pos)
     
     src = dict(
         id = surf_id,
