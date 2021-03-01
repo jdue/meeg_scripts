@@ -7,22 +7,22 @@ import nibabel as nib
 import numpy as np
 import os
 import os.path as op
-import pyvtk
+#import pyvtk
 
 from ..utils.compute_misc import triangle_normal
 
 mne.set_log_level(verbose='WARNING')
 
 def read_surface(fname):
-    """Load a surface mesh in either .off or .stl file format. Return the 
-    vertices and faces of the mesh. If .stl file, assumes only one solid, i.e. 
+    """Load a surface mesh in either .off or .stl file format. Return the
+    vertices and faces of the mesh. If .stl file, assumes only one solid, i.e.
     only one mesh per file.
-    
+
     PARAMETERS
     ----------
-    fname : str 
+    fname : str
         Name of the file to be read (.off or .stl file).
-    
+
     RETURNS
     ----------
     vertices : ndarray
@@ -32,7 +32,7 @@ def read_surface(fname):
     """
     #file_format = fname.split(".")[-1].lower()
     #file_format = op.splitext(fname)[1].lower()
-    
+
     if fname.endswith('off'):
         with open(fname, "r") as f:
             # Read header
@@ -41,18 +41,18 @@ def read_surface(fname):
             while hdr.lower() == "off" or hdr[0] == "#" or hdr == "\n":
                 hdr = f.readline()
             hdr = [int(i) for i in hdr.split()]
-            
+
             # Now read the data
             vertices = np.genfromtxt(islice(f,0,hdr[0]))
             faces    = np.genfromtxt(islice(f,0,hdr[1]),
                                      usecols=(1,2,3)).astype(np.uint)
-        
+
     elif fname.endswith('stl'):
         # mesh_flat
         #   rows 0-2 are the vertices of the 1st triangle
         #   rows 3-5 are the vertices of the 2nd triangle
         #   etc.
-        
+
         # try to read as ascii
         try:
             mesh_flat = []
@@ -62,26 +62,26 @@ def read_surface(fname):
                     if line[0] == "vertex":
                         mesh_flat.append(line[1:])
             mesh_flat = np.array(mesh_flat, dtype=np.float)
-        
+
         except UnicodeDecodeError:
-            # looks like we have a binary file    
+            # looks like we have a binary file
             with open(fname, "rb") as f:
                 # Skip the header (80 bytes), read number of triangles (1
                 # byte). The rest is the data.
-                np.fromfile(f, dtype=np.uint8, count=80)         
+                np.fromfile(f, dtype=np.uint8, count=80)
                 np.fromfile(f, dtype=np.uint32, count=1)[0]
                 data = np.fromfile(f, dtype=np.uint16, count=-1)
             data = data.reshape((-1,25))[:,:24].copy().view(np.float32)
             mesh_flat = data[:,3:].reshape(-1,3) # discard the triangle normals
-            
+
         # The stl format does not contain information about the faces, hence we
         # will need to figure this out.
-        
+
         # Get the unique vertices by viewing the array as a structured data
         # type where each column corresponds to a field of the same data type
         # as the original array (thus, each row becomes 'one object')
         # Use the inverse indices into the unique vertices as faces
-        
+
         #dt = np.dtype([("", mesh_flat.dtype)] * mesh_flat.shape[1])
         #_, uidx, iidx = np.unique(mesh_flat.view(dt), return_index=True,
         #                          return_inverse=True)
@@ -93,22 +93,22 @@ def read_surface(fname):
         # We have swapped around the points so we need to update iidx.
         # q[0] is the first point, thus we need to replace all
         # occurrences of q[0] in iidx with 0 and so on.
-        # sort q to get the correct triangle mapping    
+        # sort q to get the correct triangle mapping
         faces = np.argsort(q)[iidx].reshape(-1, 3)
-        
+
     elif fname.endswith('gii'):
         gii = nib.load(fname)
         vertices, faces = gii.darrays[0].data, gii.darrays[1].data
     else:
         #raise IOError("Invalid file format. Only files of type .off and .stl are supported.")
         raise TypeError("Unsupported surface format '{}'".format(op.splitext(fname)[1][1:]))
-    
+
     return vertices, faces
-    
+
 def write_surface(vertices, faces, fname, file_format="off", binary=True):
     """Save a surface mesh described by points in space (vertices) and indices
     into this array (faces) to an .off or .stl file.
-    
+
     PARAMETERS
     ----------
     vertices : ndarray
@@ -129,13 +129,13 @@ def write_surface(vertices, faces, fname, file_format="off", binary=True):
     """
     nFaces = len(faces)
     file_format = file_format.lower()
-    
+
     # if file format is specified in filename, use this
     if fname.split(".")[-1] in ["stl","off"]:
         file_format = fname.split(".")[-1].lower()
     else:
         fname = fname+"."+file_format
-    
+
     if file_format == "off":
         nVertices = len(vertices)
         with open(fname, "w") as f:
@@ -146,13 +146,13 @@ def write_surface(vertices, faces, fname, file_format="off", binary=True):
         np.savetxt(f,vertices,fmt="%0.6f")
         np.savetxt(f,np.concatenate((np.repeat(faces.shape[1],nFaces)[:,np.newaxis],faces),axis=1).astype(np.uint),fmt="%u")
         f.close()
-    
+
     elif file_format == "stl":
         mesh = vertices[faces]
         tnormals  = triangle_normal(vertices, faces)
         data = np.concatenate((tnormals, np.reshape(mesh, [nFaces,9])),
                               axis=1).astype(np.float32)
-        
+
         if binary:
             with open(fname, "wb") as f:
                 f.write(np.zeros(80, dtype=np.uint8))
@@ -168,137 +168,137 @@ def write_surface(vertices, faces, fname, file_format="off", binary=True):
     else:
         raise IOError("Invalid file format. Please choose off or stl.")
 
-def as_vtk(digs, cells=None, pointdata=None, celldata=None):
-    """Generate vtk data on an unstructured grid from digs (i.e., vertices)
-    and cells (i.e., the faces). Optionally, append scalar and vector values
-    for vertices and faces. If cells is None, a vtk object with only the digs
-    will be created (this may still contained pointdata).
-    
-    The returned vtk object can be saved using
-    
-        vtk.tofile(filename, format="ascii")
-        vtk.tofile(filename, format="binary")
-        
-    and visualized in, for example, ParaView.
-    
-    PARAMETERS
-    ----------
-    digs : ndarray | list of lists or tuples
-        The vertices making up the mesh.
-    cells : ndarray
-        The cells generating the elements (triangles or tetrahedra) of
-        the mesh.
-    pointdata : dict
-        Data associated with digs. Specify as field name (key) and data
-        (values).
-    celldata : dict
-        Data associated with cells (e.g., triangles). Specify as pointdata.
-        
-    RETURNS
-    ----------
-    vtk : VtkData
-        vtk data object.
-    """
-    
-    # Ensure list of lists
-    if isinstance(digs, np.ndarray):
-        digs = digs.tolist()
-    if isinstance(cells, np.ndarray):
-        cells = cells.tolist()
-      
-    # Set cell type 
-    if cells is None:
-        # Make a cell for points such that VTK filters will work properly
-        cells = dict(poly_vertex=np.arange(len(digs)))
-        # cells = dict() # For compatibility below
-        celldata = None
-    else:
-        if len(cells[0]) is 3:
-            cells = dict(triangle=cells)
-        elif len(cells[0]) is 4:
-            cells = dict(tetra=cells)
-    
-    structure = pyvtk.UnstructuredGrid(digs, **cells)
-    header = 'VTK data'
-    vtk = pyvtk.VtkData(structure, header)
-                      
-    # Determine field types and assemble DataSets
-    if pointdata is not None:
-        assert isinstance(pointdata, dict)
-        pft = dict() # field types
-        for k,v in pointdata.items():
-            try:
-                _, d = v.shape
-            except ValueError: # only one dimension
-                d = 1
-            except AttributeError:
-                d = len(v[0]) # assume all entries are equal
-            
-            if d is 1:
-                pft[k] = "scalar"
-            elif d is 3:
-                pft[k] = "vector"
-            else:
-                raise ValueError("must be 1 or 3...")
-        
-        # Assemble
-        #pd = pyvtk.PointData()
-        for k,v in pointdata.items():
-            if pft[k] == "scalar":
-                 x = pyvtk.Scalars(v,name=k)
-            elif pft[k] == "vector":
-                 x = pyvtk.Vectors(v,name=k)
-            #pd.append(x)
-            vtk.point_data.append(x)
-    #else:
-    #    pd = None
-                
-    if celldata is not None:
-        assert isinstance(celldata, dict)
-        cft = dict()
-        for k,v in celldata.items():
-            try:
-                _, d = v.shape
-            except ValueError: # only one dimension
-                d = 1
-            except AttributeError:
-                d = len(v[0]) # assume all entries are equal
-            
-            if d is 1:
-                cft[k] = "scalar"
-            elif d is 3:
-                cft[k] = "vector"
-            else:
-                raise ValueError("must be 1 or 3...")
-    
-        #cd = pyvtk.CellData()       
-        for k,v in celldata.items():
-            if cft[k] == "scalar":
-                 x = pyvtk.Scalars(v,name=k)
-            elif cft[k] == "vector":
-                 x = pyvtk.Vectors(v,name=k)
-            #cd.append(x)
-            vtk.cell_data.append(x)
-    #else:
-    #    cd = None
-    
-    return vtk
-    
+# def as_vtk(digs, cells=None, pointdata=None, celldata=None):
+#     """Generate vtk data on an unstructured grid from digs (i.e., vertices)
+#     and cells (i.e., the faces). Optionally, append scalar and vector values
+#     for vertices and faces. If cells is None, a vtk object with only the digs
+#     will be created (this may still contained pointdata).
+
+#     The returned vtk object can be saved using
+
+#         vtk.tofile(filename, format="ascii")
+#         vtk.tofile(filename, format="binary")
+
+#     and visualized in, for example, ParaView.
+
+#     PARAMETERS
+#     ----------
+#     digs : ndarray | list of lists or tuples
+#         The vertices making up the mesh.
+#     cells : ndarray
+#         The cells generating the elements (triangles or tetrahedra) of
+#         the mesh.
+#     pointdata : dict
+#         Data associated with digs. Specify as field name (key) and data
+#         (values).
+#     celldata : dict
+#         Data associated with cells (e.g., triangles). Specify as pointdata.
+
+#     RETURNS
+#     ----------
+#     vtk : VtkData
+#         vtk data object.
+#     """
+
+#     # Ensure list of lists
+#     if isinstance(digs, np.ndarray):
+#         digs = digs.tolist()
+#     if isinstance(cells, np.ndarray):
+#         cells = cells.tolist()
+
+#     # Set cell type
+#     if cells is None:
+#         # Make a cell for points such that VTK filters will work properly
+#         cells = dict(poly_vertex=np.arange(len(digs)))
+#         # cells = dict() # For compatibility below
+#         celldata = None
+#     else:
+#         if len(cells[0]) is 3:
+#             cells = dict(triangle=cells)
+#         elif len(cells[0]) is 4:
+#             cells = dict(tetra=cells)
+
+#     structure = pyvtk.UnstructuredGrid(digs, **cells)
+#     header = 'VTK data'
+#     vtk = pyvtk.VtkData(structure, header)
+
+#     # Determine field types and assemble DataSets
+#     if pointdata is not None:
+#         assert isinstance(pointdata, dict)
+#         pft = dict() # field types
+#         for k,v in pointdata.items():
+#             try:
+#                 _, d = v.shape
+#             except ValueError: # only one dimension
+#                 d = 1
+#             except AttributeError:
+#                 d = len(v[0]) # assume all entries are equal
+
+#             if d is 1:
+#                 pft[k] = "scalar"
+#             elif d is 3:
+#                 pft[k] = "vector"
+#             else:
+#                 raise ValueError("must be 1 or 3...")
+
+#         # Assemble
+#         #pd = pyvtk.PointData()
+#         for k,v in pointdata.items():
+#             if pft[k] == "scalar":
+#                  x = pyvtk.Scalars(v,name=k)
+#             elif pft[k] == "vector":
+#                  x = pyvtk.Vectors(v,name=k)
+#             #pd.append(x)
+#             vtk.point_data.append(x)
+#     #else:
+#     #    pd = None
+
+#     if celldata is not None:
+#         assert isinstance(celldata, dict)
+#         cft = dict()
+#         for k,v in celldata.items():
+#             try:
+#                 _, d = v.shape
+#             except ValueError: # only one dimension
+#                 d = 1
+#             except AttributeError:
+#                 d = len(v[0]) # assume all entries are equal
+
+#             if d is 1:
+#                 cft[k] = "scalar"
+#             elif d is 3:
+#                 cft[k] = "vector"
+#             else:
+#                 raise ValueError("must be 1 or 3...")
+
+#         #cd = pyvtk.CellData()
+#         for k,v in celldata.items():
+#             if cft[k] == "scalar":
+#                  x = pyvtk.Scalars(v,name=k)
+#             elif cft[k] == "vector":
+#                  x = pyvtk.Vectors(v,name=k)
+#             #cd.append(x)
+#             vtk.cell_data.append(x)
+#     #else:
+#     #    cd = None
+
+#     return vtk
+
 def read_data(fname, verbose=False):
     """Read data. Supported formats are listed here
-    
+
         http://martinos.org/mne/dev/manual/io.html
-    
+
     PARAMETERS
     ----------
     fname : str
         Data file or directory to read.
     verbose : bool, None
-        Verbosity    
+        Verbosity
     RETURNS
     ----------
     """
-    
+
     if os.path.isdir(fname):
         try:
             data = mne.io.read_raw_ctf(fname, verbose=verbose)
@@ -335,7 +335,7 @@ def read_data(fname, verbose=False):
 def prepare_sourcespace(pos, tris=None, coord_frame='mri', surf_id=None):
     """Setup the a discrete MNE source space object (as this is more flexible
     than the surface source space).
-    
+
     pos :
         Source positions
     tris :
@@ -343,15 +343,15 @@ def prepare_sourcespace(pos, tris=None, coord_frame='mri', surf_id=None):
         surface.
     coord_frame :
         mri or head
-            
-    sid : 
+
+    sid :
         surface id. lh, rh, or None.
     """
-    
+
     # mm -> m (input assumed to be in mm)
-    pos *= 1e-3
+    pos = pos * 1e-3 # To avoid inplace modification
     npos = len(pos)
-    
+
     # Source normals
     if tris is None:
         # Define an arbitrary direction
@@ -359,14 +359,14 @@ def prepare_sourcespace(pos, tris=None, coord_frame='mri', surf_id=None):
         nn[:, 2] = 1.0
     else:
         nn = None # Calculate later
-    
+
     if coord_frame == 'mri':
         coord_frame = FIFF.FIFFV_COORD_MRI
     elif coord_frame == 'head':
         coord_frame = FIFF.FIFFV_COORD_HEAD
     else:
         raise ValueError('coord_frame must be mri or head')
-    
+
     assert surf_id in ('lh', 'rh', None)
     if surf_id == 'lh':
         surf_id = FIFF.FIFFV_MNE_SURF_LEFT_HEMI
@@ -374,14 +374,14 @@ def prepare_sourcespace(pos, tris=None, coord_frame='mri', surf_id=None):
         surf_id = FIFF.FIFFV_MNE_SURF_RIGHT_HEMI
     elif surf_id is None:
         surf_id = FIFF.FIFFV_MNE_SURF_UNKNOWN
-        
+
     # Assumed to be in mm, thus mm -> m
     #pos = dict(
     #    rr = pos * 1e-3,
     #    nn = source_normals * 1e-3
     #    )
     #src = mne.setup_volume_source_space(subject=None, pos=pos, verbose=False)
-    
+
     src = dict(
         id = surf_id,
         type = 'discrete',
@@ -392,12 +392,12 @@ def prepare_sourcespace(pos, tris=None, coord_frame='mri', surf_id=None):
         nn = nn,
         tris = None,
         nuse = npos,
-        inuse = np.ones(npos),
+        inuse = np.ones(npos, dtype=np.int),
         vertno = np.arange(npos),
         nuse_tri = 0,
-        use_tris = None    
+        use_tris = None
         )
-    
+
     # Unused stuff
     src.update(dict(
         nearest = None,
@@ -408,7 +408,7 @@ def prepare_sourcespace(pos, tris=None, coord_frame='mri', surf_id=None):
         dist_limit = None,
         subject_his_id = None
         ))
-    
+
     if tris is not None:
         # Setup as surface source space
         # MNE doesn't like surface source spaces that are not LH or RH
@@ -416,19 +416,21 @@ def prepare_sourcespace(pos, tris=None, coord_frame='mri', surf_id=None):
                              FIFF.FIFFV_MNE_SURF_RIGHT_HEMI)
         surf = dict(rr=pos, tris=tris)
         surf = mne.surface.complete_surface_info(surf)
-        
+
         src['type'] = 'surf'
         src['tris'] = surf['tris']
         src['ntri'] = surf['ntri']
         src['nn'] = surf['nn'] # vertex normals
-        
+
         # we use all tris, so the following are not really used
-        src['use_tris'] = None # else [nuse_tri x 3] of indices into src['tris'] 
+        src['use_tris'] = None # else [nuse_tri x 3] of indices into src['tris']
         src['nuse_tri'] = 0    # else len(src['use_tris'])
-    
-    src = [src]
-    
-    return mne.source_space.SourceSpaces(src) 
+
+    mne.source_space._complete_source_space_info(src)
+
+    #src = [src]
+
+    return src #mne.source_space.SourceSpaces(src)
 
 def sourcespace_from_files(files, coord_frame='mri', surf_id=None):
     """
@@ -440,13 +442,13 @@ def sourcespace_from_files(files, coord_frame='mri', surf_id=None):
     if isinstance(files, str):
         files = [files]
     assert isinstance(files, list)
-    
+
     if surf_id is not None:
         assert len(surf_id) == len(files)
     else:
         surf_id = [None]*len(files)
-    
-    src = []    
+
+    src = []
     for f,this_id in zip(files, surf_id):
         # Source space id
         if this_id is None:
@@ -455,7 +457,7 @@ def sourcespace_from_files(files, coord_frame='mri', surf_id=None):
                 this_id = 'lh'
             elif base.startswith('rh'):
                 this_id = 'rh'
-        
+
         if f.endswith('.nii') or f.endswith('.nii.gz'):
             # Assume a (binary) nifti image
             img = nib.load(f)
@@ -467,10 +469,10 @@ def sourcespace_from_files(files, coord_frame='mri', surf_id=None):
             # Assume it is a file defining a mesh
             pos, tris = read_surface(f)
         src.append(prepare_sourcespace(pos, tris, coord_frame, this_id))
-    
+
     if isinstance(src, list):
         src = concat_sourcespaces(src)
-    
+
     return src
 
 def concat_sourcespaces(src):
@@ -483,7 +485,7 @@ def concat_sourcespaces(src):
         return src[0]
     return src[0]+concat_sourcespaces(src[1:])
 
-    
+
 def read_pos(filename):
     """Read coordinates from a Polhemus device.
     """
@@ -492,30 +494,30 @@ def read_pos(filename):
         digs = []
         for i in range(ndig):
             digs.append(np.asarray(f.readline().split()[1:], dtype=np.float64))
-            
+
         nasion = f.readline().split()
         lpa = f.readline().split()
         rpa = f.readline().split()
-    
+
     # Digitized points
     digs = np.asarray(digs)
     #digs = digs[:,[1,0,2]]
 
     # Convert from cm to m
     digs *= 1e-2
-    
+
     assert nasion[0] == "nasion"
     assert lpa[0] == "left"
     assert rpa[0] == "right"
-    
+
     nasion = np.asarray(nasion[1:], dtype=np.float64)*1e-2
     lpa = np.asarray(lpa[1:], dtype=np.float64)*1e-2
     rpa = np.asarray(rpa[1:], dtype=np.float64)*1e-2
-    
+
     # stack
     #hpi = np.concatenate((nasion[None,:], lpa[None,:], rpa[None,:]), axis=0)#[:,[1,0,2]]
-    
-    
+
+
     #hpi *= 1e-2
-    
+
     return nasion, lpa, rpa, digs
